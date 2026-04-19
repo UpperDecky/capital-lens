@@ -1,0 +1,47 @@
+# === Secrets — NEVER commit these ===
+.env
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
+env/
+
+# === Database ===
+*.db
+*.sqlite
+*.sqlite3
+
+# === Node / Frontend ===
+node_modules/
+frontend/dist/
+frontend/.vite/
+*.local
+
+# === OS ===
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# === IDE ===
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# === Logs ===
+*.log
+logs/
+
+# === Misc dev files ===
+check_models.py
+test_enrichment.py
+self-hosted-ai-starter-kit/

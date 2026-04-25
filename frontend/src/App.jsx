@@ -1,35 +1,63 @@
-import { Routes, Route } from 'react-router-dom'
+import { Routes, Route, useLocation } from 'react-router-dom'
 import NavBar from './components/NavBar'
 import DisclaimerModal from './components/DisclaimerModal'
 import DisclaimerFooter from './components/DisclaimerFooter'
+import ProtectedRoute from './components/ProtectedRoute'
 import Feed from './pages/Feed'
 import Entities from './pages/Entities'
 import EntityProfile from './pages/EntityProfile'
 import FlowMap from './pages/FlowMap'
+import GeoMap from './pages/GeoMap'
 import Themes from './pages/Themes'
 import Search from './pages/Search'
 import Login from './pages/Login'
+import Watchlist from './pages/Watchlist'
+import CashFlow from './pages/CashFlow'
+import Settings from './pages/Settings'
+import Disclaimer from './pages/Disclaimer'
+import TermsOfService from './pages/TermsOfService'
+import PrivacyPolicy from './pages/PrivacyPolicy'
+import RiskWarning from './pages/RiskWarning'
+
+function P({ children }) {
+  return <ProtectedRoute>{children}</ProtectedRoute>
+}
 
 export default function App() {
+  const { pathname } = useLocation()
+  const isAuthPage  = pathname === '/login'
+  const isLegalPage = pathname.startsWith('/legal')
+
   return (
     <div className="h-screen flex flex-col bg-white overflow-hidden">
-      {/* Legal disclaimer — shown once on first visit */}
+      {/* Disclaimer shown on first visit regardless of page */}
       <DisclaimerModal />
-      <NavBar />
-      {/* Feed uses its own overflow scroll; all other pages scroll naturally */}
+      {!isAuthPage && <NavBar />}
       <main className="flex-1 overflow-auto">
         <Routes>
-          <Route path="/"               element={<Feed />} />
-          <Route path="/entities"       element={<Entities />} />
-          <Route path="/entities/:id"   element={<EntityProfile />} />
-          <Route path="/flowmap"        element={<FlowMap />} />
-          <Route path="/themes"         element={<Themes />} />
-          <Route path="/search"         element={<Search />} />
-          <Route path="/login"          element={<Login />} />
+          {/* Auth */}
+          <Route path="/login"               element={<Login />} />
+
+          {/* Legal (publicly accessible, no auth required) */}
+          <Route path="/legal/disclaimer"    element={<Disclaimer />} />
+          <Route path="/legal/terms"         element={<TermsOfService />} />
+          <Route path="/legal/privacy"       element={<PrivacyPolicy />} />
+          <Route path="/legal/risk"          element={<RiskWarning />} />
+
+          {/* Protected app routes */}
+          <Route path="/"                    element={<P><Feed /></P>} />
+          <Route path="/entities"            element={<P><Entities /></P>} />
+          <Route path="/entities/:id"        element={<P><EntityProfile /></P>} />
+          <Route path="/flowmap"             element={<P><FlowMap /></P>} />
+          <Route path="/world"               element={<P><GeoMap /></P>} />
+          <Route path="/themes"              element={<P><Themes /></P>} />
+          <Route path="/search"              element={<P><Search /></P>} />
+          <Route path="/watchlist"           element={<P><Watchlist /></P>} />
+          <Route path="/cashflow"            element={<P><CashFlow /></P>} />
+          <Route path="/settings"            element={<P><Settings /></P>} />
         </Routes>
       </main>
-      {/* Permanent legal footer on every page */}
-      <DisclaimerFooter />
+      {!isAuthPage && !isLegalPage && <DisclaimerFooter />}
     </div>
   )
 }

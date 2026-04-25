@@ -53,27 +53,216 @@ def init_db() -> None:
             enriched_at   TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS countries (
+            iso2            TEXT PRIMARY KEY,
+            iso3            TEXT,
+            iso_num         INTEGER,
+            name            TEXT NOT NULL,
+            continent       TEXT,
+            gov_type        TEXT,
+            political_lean  TEXT,
+            conflict_status TEXT DEFAULT 'stable',
+            alliances       TEXT,
+            leader_name     TEXT,
+            leader_title    TEXT,
+            key_issues      TEXT,
+            updated_at      TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS geo_events (
+            id          TEXT PRIMARY KEY,
+            iso2        TEXT,
+            headline    TEXT NOT NULL,
+            url         TEXT,
+            source      TEXT,
+            occurred_at TEXT,
+            tone        REAL,
+            themes      TEXT,
+            ingested_at TEXT NOT NULL
+        );
+
+        -- ADS-B aircraft position snapshots (OpenSky Network)
+        CREATE TABLE IF NOT EXISTS adsb_events (
+            id           TEXT PRIMARY KEY,
+            icao24       TEXT NOT NULL,          -- ICAO 24-bit aircraft address
+            callsign     TEXT,
+            origin_country TEXT,
+            latitude     REAL,
+            longitude    REAL,
+            altitude_m   REAL,
+            velocity_ms  REAL,
+            heading      REAL,
+            on_ground    INTEGER DEFAULT 0,
+            occurred_at  TEXT NOT NULL,
+            ingested_at  TEXT NOT NULL,
+            entity_id    TEXT REFERENCES entities(id)  -- set if aircraft linked to a seed entity
+        );
+
+        -- Maritime vessel AIS snapshots (aisstream.io)
+        CREATE TABLE IF NOT EXISTS maritime_events (
+            id           TEXT PRIMARY KEY,
+            mmsi         TEXT NOT NULL,           -- Maritime Mobile Service Identity
+            ship_name    TEXT,
+            ship_type    TEXT,
+            latitude     REAL,
+            longitude    REAL,
+            speed_knots  REAL,
+            heading      REAL,
+            destination  TEXT,
+            flag_country TEXT,
+            occurred_at  TEXT NOT NULL,
+            ingested_at  TEXT NOT NULL
+        );
+
+        -- Satellite fire detections (NASA FIRMS)
+        CREATE TABLE IF NOT EXISTS satellite_events (
+            id              TEXT PRIMARY KEY,
+            source          TEXT NOT NULL,       -- VIIRS_NOAA20_NRT | MODIS_NRT
+            latitude        REAL NOT NULL,
+            longitude       REAL NOT NULL,
+            brightness      REAL,                -- fire radiative power (MW)
+            confidence      TEXT,                -- low | nominal | high
+            acq_date        TEXT,
+            acq_time        TEXT,
+            country_iso2    TEXT,
+            ingested_at     TEXT NOT NULL
+        );
+
+        -- Prediction market snapshots (Polymarket)
+        CREATE TABLE IF NOT EXISTS prediction_markets (
+            id              TEXT PRIMARY KEY,    -- Polymarket market conditionId
+            question        TEXT NOT NULL,
+            category        TEXT,
+            end_date        TEXT,
+            yes_price       REAL,                -- 0.0–1.0 probability
+            no_price        REAL,
+            volume_usd      REAL,
+            liquidity_usd   REAL,
+            active          INTEGER DEFAULT 1,
+            entity_id       TEXT REFERENCES entities(id),
+            fetched_at      TEXT NOT NULL
+        );
+
+        -- ACLED conflict events (geo_events table handles these via source='ACLED')
+        -- Cloudflare internet outage events
+        CREATE TABLE IF NOT EXISTS infra_events (
+            id           TEXT PRIMARY KEY,
+            outage_type  TEXT,                   -- nationwide | regional | isp
+            scope        TEXT,                   -- country/city/ASN affected
+            cause        TEXT,
+            iso2         TEXT,
+            asn          TEXT,
+            started_at   TEXT,
+            ended_at     TEXT,
+            ingested_at  TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_geo_events_iso2 ON geo_events(iso2);
+        CREATE INDEX IF NOT EXISTS idx_geo_events_occurred ON geo_events(occurred_at DESC);
         CREATE INDEX IF NOT EXISTS idx_events_entity   ON events(entity_id);
         CREATE INDEX IF NOT EXISTS idx_events_occurred ON events(occurred_at DESC);
         CREATE INDEX IF NOT EXISTS idx_events_type     ON events(event_type);
         CREATE INDEX IF NOT EXISTS idx_events_ingested ON events(ingested_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_adsb_icao ON adsb_events(icao24);
+        CREATE INDEX IF NOT EXISTS idx_adsb_occurred ON adsb_events(occurred_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_maritime_mmsi ON maritime_events(mmsi);
+        CREATE INDEX IF NOT EXISTS idx_satellite_date ON satellite_events(acq_date DESC);
+        CREATE INDEX IF NOT EXISTS idx_infra_started ON infra_events(started_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_pm_entity ON prediction_markets(entity_id);
+        CREATE INDEX IF NOT EXISTS idx_pm_fetched ON prediction_markets(fetched_at DESC);
 
         CREATE TABLE IF NOT EXISTS users (
             id            TEXT PRIMARY KEY,
             email         TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
-            tier          TEXT NOT NULL DEFAULT 'free' CHECK(tier IN ('free','pro')),
+            tier          TEXT NOT NULL DEFAULT 'free' CHECK(tier IN ('free','pro','admin')),
             created_at    TEXT NOT NULL
         );
     """)
+    # entity_connections: structured graph edges with validity + confidence tracking
+    cur.executescript("""
+        CREATE TABLE IF NOT EXISTS entity_connections (
+            id           TEXT PRIMARY KEY,
+            source_id    TEXT NOT NULL REFERENCES entities(id),
+            target_id    TEXT NOT NULL REFERENCES entities(id),
+            edge_type    TEXT NOT NULL,
+            label        TEXT,
+            weight       INTEGER DEFAULT 2,
+            confidence   TEXT NOT NULL DEFAULT 'medium'
+                         CHECK(confidence IN ('high','medium','low')),
+            source_url   TEXT,
+            source_name  TEXT,
+            derived_from TEXT,
+            valid_from   TEXT,
+            valid_to     TEXT,
+            ingested_at  TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_ec_source  ON entity_connections(source_id);
+        CREATE INDEX IF NOT EXISTS idx_ec_target  ON entity_connections(target_id);
+        CREATE INDEX IF NOT EXISTS idx_ec_valid   ON entity_connections(valid_to);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_ec_dedup
+            ON entity_connections(source_id, target_id, edge_type);
+    """)
+
+    # cash_flows: global capital movement tracking (crypto, sanctions, VC, dark money)
+    cur.executescript("""
+        CREATE TABLE IF NOT EXISTS cash_flows (
+            id              TEXT PRIMARY KEY,
+            flow_type       TEXT NOT NULL,
+            asset           TEXT,
+            amount_usd      REAL,
+            source_label    TEXT,
+            dest_label      TEXT,
+            source_country  TEXT,
+            dest_country    TEXT,
+            source_lat      REAL,
+            source_lon      REAL,
+            dest_lat        REAL,
+            dest_lon        REAL,
+            tx_hash         TEXT,
+            headline        TEXT NOT NULL,
+            description     TEXT,
+            source_name     TEXT,
+            source_url      TEXT,
+            entity_id       TEXT REFERENCES entities(id),
+            anomaly_score   REAL DEFAULT 0,
+            occurred_at     TEXT NOT NULL,
+            ingested_at     TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_cf_tx_hash
+            ON cash_flows(tx_hash) WHERE tx_hash IS NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_cf_url
+            ON cash_flows(source_url) WHERE source_url IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_cf_type     ON cash_flows(flow_type);
+        CREATE INDEX IF NOT EXISTS idx_cf_occurred ON cash_flows(occurred_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cf_amount   ON cash_flows(amount_usd DESC);
+        CREATE INDEX IF NOT EXISTS idx_cf_src_cty  ON cash_flows(source_country);
+        CREATE INDEX IF NOT EXISTS idx_cf_dst_cty  ON cash_flows(dest_country);
+    """)
+    conn.commit()
+
     for col_def in [
         "ALTER TABLE events ADD COLUMN analysis TEXT",
+        "ALTER TABLE geo_events ADD COLUMN latitude REAL",
+        "ALTER TABLE geo_events ADD COLUMN longitude REAL",
         "ALTER TABLE entities ADD COLUMN last_price REAL",
         "ALTER TABLE entities ADD COLUMN price_updated_at TEXT",
         "ALTER TABLE entities ADD COLUMN ticker TEXT",
         "ALTER TABLE entities ADD COLUMN funding_sources TEXT",
         "ALTER TABLE events ADD COLUMN importance INTEGER DEFAULT 3",
         "ALTER TABLE events ADD COLUMN subtype TEXT",
+        "ALTER TABLE entities ADD COLUMN net_worth_updated_at TEXT",
+        "ALTER TABLE entities ADD COLUMN net_worth_source TEXT",
+        # MFA columns
+        "ALTER TABLE users ADD COLUMN totp_secret TEXT",
+        "ALTER TABLE users ADD COLUMN mfa_enabled INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN mfa_backup_codes TEXT",
+        # Tier tracking columns
+        "ALTER TABLE users ADD COLUMN daily_event_count INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN daily_reset_at TEXT",
+        # Compliance / legal columns
+        "ALTER TABLE users ADD COLUMN disclaimers_accepted_at TEXT",
+        "ALTER TABLE users ADD COLUMN tos_version TEXT",
     ]:
         try:
             conn.execute(col_def)
@@ -158,60 +347,81 @@ def seed_db() -> None:
     conn = get_connection()
     cur = conn.cursor()
     now = datetime.now(timezone.utc).isoformat()
+    # Net worth / market cap values reflect best estimates as of April 2025.
+    # Public company figures are approximate; the valuation ingestor overwrites
+    # these with live Yahoo Finance market cap on first scheduler run.
     rows = [
-        ("Apple",              "company",    "Technology",   3.0e12, "Consumer electronics and software"),
-        ("Nvidia",             "company",    "Technology",   2.8e12, "AI chips and GPU computing"),
-        ("Microsoft",          "company",    "Technology",   3.1e12, "Cloud computing and enterprise software"),
-        ("Alphabet",           "company",    "Technology",   2.2e12, "Search, advertising, and cloud"),
-        ("Meta",               "company",    "Technology",   1.2e12, "Social media and virtual reality"),
-        ("Amazon",             "company",    "E-Commerce",   1.9e12, "E-commerce, cloud, and logistics"),
-        ("Tesla",              "company",    "Automotive",   6.0e11, "Electric vehicles and energy storage"),
-        ("Berkshire Hathaway", "company",    "Finance",      9.0e11, "Diversified holding conglomerate"),
-        ("JPMorgan",           "company",    "Finance",      7.0e11, "Global banking and financial services"),
-        ("Goldman Sachs",      "company",    "Finance",      1.5e11, "Investment banking and asset management"),
-        ("BlackRock",          "company",    "Finance",      1.3e11, "World's largest asset manager"),
-        ("ExxonMobil",         "company",    "Energy",       5.0e11, "Oil and natural gas exploration"),
-        ("Lockheed Martin",    "company",    "Defense",      1.3e11, "Aerospace and defense systems"),
-        ("Pfizer",             "company",    "Healthcare",   1.7e11, "Pharmaceuticals and vaccines"),
-        ("Walmart",            "company",    "Retail",       5.0e11, "Global retail and grocery"),
-        ("Visa",               "company",    "Finance",      5.5e11, "Electronic payment network"),
-        ("Palantir",           "company",    "Technology",   5.0e10, "Data analytics and AI for government"),
-        ("SpaceX",             "company",    "Aerospace",    2.0e11, "Rocket launches and satellite internet"),
-        ("OpenAI",             "company",    "Technology",   8.0e10, "AI research and products"),
-        ("Anthropic",          "company",    "Technology",   1.8e10, "AI safety research and Claude AI"),
-        ("Elon Musk",          "individual", "Technology",   2.3e11, "CEO of Tesla, SpaceX; owner of X"),
-        ("Jeff Bezos",         "individual", "E-Commerce",   1.7e11, "Founder of Amazon"),
-        ("Bill Gates",         "individual", "Technology",   1.3e11, "Co-founder of Microsoft"),
-        ("Mark Zuckerberg",    "individual", "Technology",   1.7e11, "CEO of Meta"),
-        ("Warren Buffett",     "individual", "Finance",      1.1e11, "CEO of Berkshire Hathaway"),
-        ("Larry Ellison",      "individual", "Technology",   1.4e11, "Co-founder of Oracle"),
-        ("Ken Griffin",        "individual", "Finance",      3.5e10, "Founder of Citadel"),
-        ("Ray Dalio",          "individual", "Finance",      1.9e10, "Founder of Bridgewater Associates"),
-        ("George Soros",       "individual", "Finance",      6.7e9,  "Founder of Soros Fund Management"),
-        ("Carl Icahn",         "individual", "Finance",      7.0e9,  "Activist investor"),
-        ("Nancy Pelosi",       "individual", "Government",   1.1e8,  "Former Speaker of the US House; known for high-profile stock trades"),
-        ("Donald Trump",       "individual", "Government",   7.0e9,  "47th US President; real estate developer; Truth Social owner"),
-        ("Mitch McConnell",    "individual", "Government",   3.4e7,  "US Senate Minority Leader; Kentucky senator"),
-        ("Mitt Romney",        "individual", "Government",   2.5e8,  "Former US Senator, Utah; private equity veteran (Bain Capital)"),
-        ("Tommy Tuberville",   "individual", "Government",   1.1e7,  "US Senator, Alabama; known for active individual stock trading"),
-        ("Ro Khanna",          "individual", "Government",   2.0e7,  "US Representative, Silicon Valley; prominent tech policy voice"),
-        ("Alexandria Ocasio-Cortez", "individual", "Government", 1.0e6, "US Representative, New York; progressive policy advocate"),
-        ("Dan Crenshaw",       "individual", "Government",   3.5e6,  "US Representative, Texas; national security focus"),
-        ("Gavin Newsom",       "individual", "Government",   2.0e7,  "Governor of California; clean energy and tech policy shaper"),
-        ("Pete Buttigieg",     "individual", "Government",   7.0e6,  "Former US Secretary of Transportation; infrastructure and EV policy"),
-        ("Federal Reserve",    "company",    "Finance",      0.0,    "US central bank -- sets interest rates and monetary policy"),
-        ("US Treasury",        "company",    "Government",   0.0,    "US Treasury Department -- issues debt, enforces sanctions, manages fiscal policy"),
-        ("Boeing",             "company",    "Defense",      1.1e11, "Aerospace manufacturer -- commercial jets and defense systems"),
-        ("Raytheon",           "company",    "Defense",      1.6e11, "Defense contractor -- missiles, radar, cybersecurity"),
-        ("General Dynamics",   "company",    "Defense",      6.5e10, "Defense and IT services -- ships, submarines, Gulfstream jets"),
+        # ---- Public companies (market cap Apr 2025) --------------------------
+        ("Apple",              "company",    "Technology",   3.12e12, "Consumer electronics and software"),
+        ("Nvidia",             "company",    "Technology",   2.55e12, "AI chips and GPU computing"),
+        ("Microsoft",          "company",    "Technology",   2.80e12, "Cloud computing and enterprise software"),
+        ("Alphabet",           "company",    "Technology",   1.92e12, "Search, advertising, and cloud"),
+        ("Meta",               "company",    "Technology",   1.42e12, "Social media and virtual reality"),
+        ("Amazon",             "company",    "E-Commerce",   2.15e12, "E-commerce, cloud, and logistics"),
+        ("Tesla",              "company",    "Automotive",   7.50e11, "Electric vehicles and energy storage"),
+        ("Berkshire Hathaway", "company",    "Finance",      1.02e12, "Diversified holding conglomerate"),
+        ("JPMorgan",           "company",    "Finance",      7.25e11, "Global banking and financial services"),
+        ("Goldman Sachs",      "company",    "Finance",      1.85e11, "Investment banking and asset management"),
+        ("BlackRock",          "company",    "Finance",      1.40e11, "World's largest asset manager"),
+        ("ExxonMobil",         "company",    "Energy",       4.60e11, "Oil and natural gas exploration"),
+        ("Lockheed Martin",    "company",    "Defense",      1.05e11, "Aerospace and defense systems"),
+        ("Pfizer",             "company",    "Healthcare",   1.35e11, "Pharmaceuticals and vaccines"),
+        ("Walmart",            "company",    "Retail",       7.80e11, "Global retail and grocery"),
+        ("Visa",               "company",    "Finance",      6.20e11, "Electronic payment network"),
+        ("Palantir",           "company",    "Technology",   3.42e11, "Data analytics and AI for government"),
+        # ---- Private companies (last known valuation) ------------------------
+        ("SpaceX",             "company",    "Aerospace",    3.50e11, "Rocket launches and satellite internet"),
+        ("OpenAI",             "company",    "Technology",   3.00e11, "AI research and products"),
+        ("Anthropic",          "company",    "Technology",   6.10e10, "AI safety research and Claude AI"),
+        # ---- Individuals (Forbes/Bloomberg estimates, Apr 2025) --------------
+        ("Elon Musk",          "individual", "Technology",   3.00e11, "CEO of Tesla, SpaceX; owner of X"),
+        ("Jeff Bezos",         "individual", "E-Commerce",   2.20e11, "Founder of Amazon"),
+        ("Mark Zuckerberg",    "individual", "Technology",   2.10e11, "CEO of Meta"),
+        ("Larry Ellison",      "individual", "Technology",   1.85e11, "Co-founder of Oracle"),
+        ("Warren Buffett",     "individual", "Finance",      1.55e11, "CEO of Berkshire Hathaway"),
+        ("Bill Gates",         "individual", "Technology",   1.30e11, "Co-founder of Microsoft"),
+        ("Ken Griffin",        "individual", "Finance",      4.30e10, "Founder of Citadel"),
+        ("Ray Dalio",          "individual", "Finance",      1.80e10, "Founder of Bridgewater Associates"),
+        ("George Soros",       "individual", "Finance",      7.00e9,  "Founder of Soros Fund Management"),
+        ("Carl Icahn",         "individual", "Finance",      6.50e9,  "Activist investor"),
+        ("Donald Trump",       "individual", "Government",   6.50e9,  "47th US President; real estate and Truth Social"),
+        ("Nancy Pelosi",       "individual", "Government",   2.50e8,  "Former Speaker; active stock trader per STOCK Act disclosures"),
+        ("Mitt Romney",        "individual", "Government",   3.00e8,  "Former US Senator, Utah; private equity veteran (Bain Capital)"),
+        ("Mitch McConnell",    "individual", "Government",   3.50e7,  "US Senate Minority Leader; Kentucky senator"),
+        ("Tommy Tuberville",   "individual", "Government",   1.50e7,  "US Senator, Alabama; known for active stock trading"),
+        ("Ro Khanna",          "individual", "Government",   2.50e7,  "US Representative, Silicon Valley; prominent tech policy voice"),
+        ("Gavin Newsom",       "individual", "Government",   2.30e7,  "Governor of California; clean energy and tech policy shaper"),
+        ("Dan Crenshaw",       "individual", "Government",   4.00e6,  "US Representative, Texas; national security focus"),
+        ("Pete Buttigieg",     "individual", "Government",   7.00e6,  "Former US Secretary of Transportation; infrastructure and EV policy"),
+        ("Alexandria Ocasio-Cortez", "individual", "Government", 2.0e5, "US Representative, New York; progressive policy advocate"),
+        # ---- Government institutions -----------------------------------------
+        ("Federal Reserve",    "company",    "Finance",      0.0,     "US central bank -- sets interest rates and monetary policy"),
+        ("US Treasury",        "company",    "Government",   0.0,     "US Treasury Department -- issues debt, enforces sanctions"),
+        # ---- Defense contractors (market cap Apr 2025) -----------------------
+        ("Boeing",             "company",    "Defense",      9.50e10, "Aerospace manufacturer -- commercial jets and defense systems"),
+        ("Raytheon",           "company",    "Defense",      1.35e11, "Defense contractor -- missiles, radar, cybersecurity"),
+        ("General Dynamics",   "company",    "Defense",      6.80e10, "Defense and IT services -- ships, submarines, Gulfstream jets"),
     ]
     for name, etype, sector, net_worth, desc in rows:
         exists = cur.execute("SELECT 1 FROM entities WHERE name=?", (name,)).fetchone()
         if not exists:
             cur.execute(
-                "INSERT INTO entities (id,name,type,sector,net_worth,description,created_at) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (str(uuid.uuid4()), name, etype, sector, net_worth, desc, now),
+                "INSERT INTO entities "
+                "(id,name,type,sector,net_worth,description,created_at,"
+                " net_worth_source,net_worth_updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (
+                    str(uuid.uuid4()), name, etype, sector, net_worth, desc, now,
+                    "seed_initial", now,
+                ),
+            )
+        else:
+            # Update stale seed values if they haven't been refreshed by the live ingestor
+            cur.execute(
+                """UPDATE entities
+                   SET net_worth=?, net_worth_source=?, net_worth_updated_at=?
+                   WHERE name=? AND (net_worth_source='seed_initial' OR net_worth_source IS NULL)""",
+                (net_worth, "seed_initial", now, name),
             )
     conn.commit()
     conn.close()
@@ -302,35 +512,263 @@ def seed_events() -> None:
          "OpenAI Blog", "2025-01-05"),
         ("Anthropic", "news",        "Anthropic raises $4B from Amazon, total funding exceeds $7.3B",
          4_000_000_000.0, "USD",
-         "https://www.anthropic.com/news",
-         "Anthropic Blog", "2025-01-18"),
+         "https://www.anthropic.com/",
+         "Anthropic Blog", "2025-01-08"),
     ]
-    inserted = 0
-    for (ename, etype, headline, amount, currency, url, source, date) in sample_events:
-        entity_id = emap.get(ename)
+    for name, etype, headline, amount, currency, url, source, date in sample_events:
+        entity_id = emap.get(name)
         if not entity_id:
             continue
         exists = cur.execute(
-            "SELECT 1 FROM events WHERE entity_id=? AND headline=?",
-            (entity_id, headline),
+            "SELECT 1 FROM events WHERE source_url=? AND headline=?", (url, headline)
         ).fetchone()
-        if exists:
-            continue
-        cur.execute(
-            "INSERT INTO events "
-            "(id, entity_id, event_type, headline, amount, currency, "
-            " source_url, source_name, occurred_at, ingested_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (str(uuid.uuid4()), entity_id, etype, headline,
-             amount, currency, url, source, date, now),
-        )
-        inserted += 1
+        if not exists:
+            cur.execute(
+                """INSERT INTO events
+                   (id, entity_id, event_type, headline, amount, currency,
+                    source_url, source_name, occurred_at, ingested_at, importance)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    str(__import__("uuid").uuid4()),
+                    entity_id,
+                    etype,
+                    headline,
+                    amount,
+                    currency,
+                    url,
+                    source,
+                    date + "T00:00:00+00:00",
+                    __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+                    5,  # high importance for seed events
+                ),
+            )
     conn.commit()
     conn.close()
-    print(f"Seeded {inserted} sample events.")
+    print("[DB] Seed events complete.")
 
 
-if __name__ == "__main__":
-    init_db()
-    seed_db()
-    seed_events()
+def seed_countries() -> None:
+    """
+    Seed the countries table with geopolitical metadata for ~65 countries.
+    Uses ISO 3166 numeric codes for TopoJSON mapping.
+    Only inserts new rows — safe to call on every startup.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    now = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+
+    # fmt: (iso2, iso3, iso_num, name, continent, gov_type, political_lean,
+    #        conflict_status, alliances_json, leader_name, leader_title, key_issues_json)
+    countries = [
+        # ── Active war / conflict zones ─────────────────────────────────────
+        ("UA", "UKR", 804, "Ukraine",         "Europe",   "Republic",         "centre_right",
+         "war",             '["UN","OSCE"]',              "Volodymyr Zelensky",   "President",
+         '["Russian invasion","energy crisis","reconstruction"]'),
+        ("RU", "RUS", 643, "Russia",           "Europe",   "Federal Republic",  "authoritarian",
+         "war",             '["CIS","SCO","BRICS"]',      "Vladimir Putin",       "President",
+         '["Ukraine war","sanctions","economy"]'),
+        ("IL", "ISR", 376, "Israel",           "Asia",     "Parliamentary Democracy","centre_right",
+         "war",             '["Western allies"]',         "Isaac Herzog",         "President",
+         '["Gaza conflict","West Bank","Iran tensions"]'),
+        ("PS", "PSE", 275, "Palestine",        "Asia",     "Palestinian Authority","left",
+         "war",             '["Arab League"]',            "Mahmoud Abbas",        "President (PA)",
+         '["Gaza war","statehood","humanitarian crisis"]'),
+        ("SD", "SDN", 729, "Sudan",            "Africa",   "Military Junta",    "authoritarian",
+         "war",             '["Arab League"]',            "Abdel Fattah al-Burhan","Commander",
+         '["Civil war","RSF conflict","famine","Darfur"]'),
+        ("MM", "MMR", 104, "Myanmar",          "Asia",     "Military Junta",    "authoritarian",
+         "war",             '["ASEAN"]',                  "Min Aung Hlaing",      "Commander-in-Chief",
+         '["Civil war","coup","ethnic conflict","sanctions"]'),
+        ("YE", "YEM", 887, "Yemen",            "Asia",     "Transitional",      "unknown",
+         "war",             '["Arab League"]',            "Rashad al-Alimi",      "Presidential Council Chair",
+         '["Houthi conflict","Red Sea attacks","humanitarian crisis"]'),
+        ("ET", "ETH", 231, "Ethiopia",         "Africa",   "Federal Republic",  "left",
+         "active_conflict", '["AU","IGAD"]',              "Abiy Ahmed",           "Prime Minister",
+         '["Amhara conflict","Tigray aftermath","economy"]'),
+        ("CD", "COD", 180, "DR Congo",         "Africa",   "Republic",          "centre",
+         "active_conflict", '["AU","SADC"]',              "Félix Tshisekedi",     "President",
+         '["M23 rebels","Rwanda tensions","mineral wealth"]'),
+        ("LY", "LBY", 434, "Libya",            "Africa",   "Divided Government", "unknown",
+         "active_conflict", '["Arab League","UN"]',       "Mohamed al-Menfi",     "Presidential Council Head",
+         '["East-West split","Haftar","oil revenues","migration"]'),
+        ("ML", "MLI", 466, "Mali",             "Africa",   "Military Junta",    "authoritarian",
+         "active_conflict", '["ECOWAS suspended"]',       "Assimi Goïta",         "Transitional President",
+         '["Jihadist insurgency","Wagner group","French expulsion"]'),
+        ("HT", "HTI", 332, "Haiti",            "Americas", "Transitional",      "unknown",
+         "active_conflict", '["CARICOM"]',                "Garry Conille",        "Prime Minister",
+         '["Gang violence","political vacuum","humanitarian crisis"]'),
+        # ── High tension ────────────────────────────────────────────────────
+        ("IR", "IRN", 364, "Iran",             "Asia",     "Islamic Republic",  "theocratic",
+         "tension",         '["SCO","BRICS"]',            "Masoud Pezeshkian",    "President",
+         '["Nuclear program","IAEA","US sanctions","proxy militias"]'),
+        ("KP", "PRK", 408, "North Korea",      "Asia",     "Single-party State", "far_left",
+         "tension",         '[]',                         "Kim Jong Un",          "Supreme Leader",
+         '["Nuclear weapons","missile tests","sanctions","China relations"]'),
+        ("CN", "CHN", 156, "China",            "Asia",     "Single-party State", "authoritarian",
+         "tension",         '["SCO","BRICS","RCEP"]',     "Xi Jinping",           "President",
+         '["Taiwan Strait","South China Sea","trade war","Xinjiang"]'),
+        ("TW", "TWN", 158, "Taiwan",           "Asia",     "Democracy",         "centre_right",
+         "tension",         '["informal Western alliances"]',"Lai Ching-te",      "President",
+         '["China threat","semiconductor dominance","US arms sales"]'),
+        ("VE", "VEN", 862, "Venezuela",        "Americas", "Presidential Republic","far_left",
+         "tension",         '["ALBA"]',                   "Nicolás Maduro",       "President",
+         '["US sanctions","election dispute","economic collapse","migration"]'),
+        ("SY", "SYR", 760, "Syria",            "Asia",     "Transitional",      "unknown",
+         "tension",         '["Arab League (readmitted)"]',"Ahmad al-Sharaa",     "Leader (HTS)",
+         '["Post-Assad transition","reconstruction","sanctions relief"]'),
+        ("AF", "AFG", 4,   "Afghanistan",      "Asia",     "Emirate",           "theocratic",
+         "tension",         '[]',                         "Hibatullah Akhundzada","Supreme Leader",
+         '["Taliban rule","humanitarian crisis","women rights","sanctions"]'),
+        ("PK", "PAK", 586, "Pakistan",         "Asia",     "Federal Republic",  "right",
+         "tension",         '["SCO","OIC"]',              "Asif Ali Zardari",     "President",
+         '["IMF bailout","India tensions","Khan imprisonment","floods"]'),
+        ("IN", "IND", 356, "India",            "Asia",     "Federal Republic",  "right",
+         "tension",         '["BRICS","SCO","Quad"]',     "Narendra Modi",        "Prime Minister",
+         '["Pakistan border","China border","religious tensions","tech growth"]'),
+        ("KR", "KOR", 410, "South Korea",      "Asia",     "Presidential Republic","centre_right",
+         "tension",         '["US alliance","G20"]',      "Han Duck-soo",         "Acting President",
+         '["North Korea threat","martial law crisis","US alliance","semiconductors"]'),
+        ("NG", "NGA", 566, "Nigeria",          "Africa",   "Federal Republic",  "centre",
+         "tension",         '["AU","ECOWAS"]',            "Bola Tinubu",          "President",
+         '["Boko Haram","oil economy","naira devaluation","banditry"]'),
+        ("MX", "MEX", 484, "Mexico",           "Americas", "Federal Republic",  "left",
+         "tension",         '["USMCA","G20"]',            "Claudia Sheinbaum",    "President",
+         '["Cartel violence","USMCA trade","US relations","judicial reform"]'),
+        # ── Stable but geopolitically significant ───────────────────────────
+        ("US", "USA", 840, "United States",    "Americas", "Federal Republic",  "centre_right",
+         "stable",          '["NATO","G7","Five Eyes","Quad"]',"Donald Trump",    "President",
+         '["Tariff policy","Ukraine support","China rivalry","border"]'),
+        ("GB", "GBR", 826, "United Kingdom",   "Europe",   "Constitutional Monarchy","centre_right",
+         "stable",          '["NATO","G7","Five Eyes","AUKUS"]',"Keir Starmer",  "Prime Minister",
+         '["Post-Brexit trade","Ukraine support","NHS","Scotland"]'),
+        ("DE", "DEU", 276, "Germany",          "Europe",   "Federal Republic",  "centre_right",
+         "stable",          '["NATO","G7","EU"]',         "Friedrich Merz",       "Chancellor",
+         '["Energy transition","Ukraine aid","fiscal policy","AfD rise"]'),
+        ("FR", "FRA", 250, "France",           "Europe",   "Semi-presidential", "centre",
+         "stable",          '["NATO","G7","EU","UN P5"]', "Emmanuel Macron",      "President",
+         '["Political fragmentation","Ukraine policy","Africa policy","pension reform"]'),
+        ("JP", "JPN", 392, "Japan",            "Asia",     "Constitutional Monarchy","centre_right",
+         "stable",          '["G7","Quad","US alliance"]',"Shigeru Ishiba",       "Prime Minister",
+         '["Defense buildup","China rivalry","semiconductor policy","aging population"]'),
+        ("CA", "CAN", 124, "Canada",           "Americas", "Constitutional Monarchy","centre_left",
+         "stable",          '["NATO","G7","Five Eyes","USMCA"]',"Mark Carney",   "Prime Minister",
+         '["US tariffs","Quebec separatism","energy policy","immigration"]'),
+        ("AU", "AUS", 36,  "Australia",        "Oceania",  "Constitutional Monarchy","centre_left",
+         "stable",          '["Five Eyes","AUKUS","Quad"]',"Anthony Albanese",    "Prime Minister",
+         '["China relations","AUKUS submarine deal","climate policy"]'),
+        ("SA", "SAU", 682, "Saudi Arabia",     "Asia",     "Absolute Monarchy", "authoritarian",
+         "stable",          '["G20","Arab League","OPEC+"]',"Mohammed bin Salman","Crown Prince & PM",
+         '["OPEC+ oil cuts","Vision 2030","Israel normalization","Yemen"]'),
+        ("TR", "TUR", 792, "Turkey",           "Europe",   "Presidential Republic","right",
+         "stable",          '["NATO","G20"]',             "Recep Tayyip Erdoğan", "President",
+         '["NATO tensions","Syria","inflation","Kurdish issue","mediation role"]'),
+        ("BR", "BRA", 76,  "Brazil",           "Americas", "Federal Republic",  "left",
+         "stable",          '["BRICS","G20","Mercosur"]', "Luiz Inácio Lula da Silva","President",
+         '["Amazon deforestation","economic reform","BRICS leadership","China trade"]'),
+        ("ZA", "ZAF", 710, "South Africa",     "Africa",   "Republic",          "centre_left",
+         "stable",          '["BRICS","AU","G20"]',       "Cyril Ramaphosa",      "President",
+         '["Load shedding","ANC coalition","crime","China-US balancing"]'),
+        ("EG", "EGY", 818, "Egypt",            "Africa",   "Presidential Republic","authoritarian",
+         "stable",          '["Arab League","AU"]',       "Abdel Fattah el-Sisi", "President",
+         '["Gaza mediation","IMF program","Suez Canal","Ethiopia dam dispute"]'),
+        ("ID", "IDN", 360, "Indonesia",        "Asia",     "Presidential Republic","centre",
+         "stable",          '["ASEAN","G20"]',            "Prabowo Subianto",     "President",
+         '["ASEAN chair","South China Sea","nickel dominance","US-China balancing"]'),
+        ("IT", "ITA", 380, "Italy",            "Europe",   "Parliamentary Republic","right",
+         "stable",          '["NATO","G7","EU"]',         "Giorgia Meloni",        "Prime Minister",
+         '["Migration","EU relations","Ukraine support","economy"]'),
+        ("ES", "ESP", 724, "Spain",            "Europe",   "Constitutional Monarchy","centre_left",
+         "stable",          '["NATO","EU"]',              "Pedro Sánchez",         "Prime Minister",
+         '["Catalonia","immigration","economy","Ukraine aid"]'),
+        ("PL", "POL", 616, "Poland",           "Europe",   "Parliamentary Republic","centre_right",
+         "stable",          '["NATO","EU"]',              "Donald Tusk",           "Prime Minister",
+         '["Ukraine border","defense buildup","rule of law","Russia threat"]'),
+        ("UA", "UKR", 804, "Ukraine",         "Europe",   "Republic",         "centre_right",
+         "war",             '["UN","OSCE"]',              "Volodymyr Zelensky",   "President",
+         '["Russian invasion","energy crisis","reconstruction"]'),
+        ("NL", "NLD", 528, "Netherlands",      "Europe",   "Constitutional Monarchy","centre_right",
+         "stable",          '["NATO","EU"]',              "Dick Schoof",           "Prime Minister",
+         '["ASML semiconductor dominance","Ukraine aid","migration","coalition politics"]'),
+        ("SE", "SWE", 752, "Sweden",           "Europe",   "Constitutional Monarchy","centre_right",
+         "stable",          '["NATO","EU"]',              "Ulf Kristersson",       "Prime Minister",
+         '["New NATO membership","Ukraine aid","migration","defense spending"]'),
+        ("CH", "CHE", 756, "Switzerland",      "Europe",   "Federal Republic",  "centre",
+         "stable",          '[]',                         "Karin Keller-Sutter",   "Federal Council President",
+         '["Neutrality debate","banking sector","EU relations","sanctions on Russia"]'),
+        ("NO", "NOR", 578, "Norway",           "Europe",   "Constitutional Monarchy","centre_left",
+         "stable",          '["NATO"]',                   "Jonas Gahr Støre",      "Prime Minister",
+         '["Oil fund ($1.7T sovereign wealth)","Ukraine aid","Arctic security"]'),
+        ("UA", "UKR", 804, "Ukraine",         "Europe",   "Republic",         "centre_right",
+         "war",             '["UN","OSCE"]',              "Volodymyr Zelensky",   "President",
+         '["Russian invasion","energy crisis","reconstruction"]'),
+        ("GR", "GRC", 300, "Greece",           "Europe",   "Parliamentary Republic","centre_right",
+         "stable",          '["NATO","EU"]',              "Kyriakos Mitsotakis",   "Prime Minister",
+         '["Turkey tensions","migration","debt recovery","defense spending"]'),
+        ("NG", "NGA", 566, "Nigeria",          "Africa",   "Federal Republic",  "centre",
+         "tension",         '["AU","ECOWAS"]',            "Bola Tinubu",           "President",
+         '["Boko Haram","oil economy","naira devaluation","banditry"]'),
+        ("AR", "ARG", 32,  "Argentina",        "Americas", "Federal Republic",  "right",
+         "stable",          '["G20","Mercosur"]',         "Javier Milei",          "President",
+         '["Dollarization","IMF debt","austerity","Falklands"]'),
+        ("CL", "CHL", 152, "Chile",            "Americas", "Presidential Republic","centre_left",
+         "stable",          '["Pacific Alliance"]',       "Gabriel Boric",         "President",
+         '["Copper dominance","lithium nationalization","pension reform","Mapuche"]'),
+        ("CO", "COL", 170, "Colombia",         "Americas", "Presidential Republic","centre_left",
+         "stable",          '["UN","OAS"]',               "Gustavo Petro",         "President",
+         '["FARC remnants","drug trade","Venezuela relations","US relations"]'),
+        ("UA", "UKR", 804, "Ukraine",         "Europe",   "Republic",         "centre_right",
+         "war",             '["UN","OSCE"]',              "Volodymyr Zelensky",   "President",
+         '["Russian invasion","energy crisis","reconstruction"]'),
+        ("MA", "MAR", 504, "Morocco",          "Africa",   "Constitutional Monarchy","centre",
+         "stable",          '["Arab League","AU observer"]',"Mohammed VI",         "King",
+         '["Western Sahara","EU migration deal","normalization with Israel"]'),
+        ("KE", "KEN", 404, "Kenya",            "Africa",   "Presidential Republic","centre",
+         "stable",          '["AU","EAC"]',               "William Ruto",          "President",
+         '["East Africa hub","IMF austerity","Somalia peacekeeping","debt"]'),
+        ("TH", "THA", 764, "Thailand",         "Asia",     "Constitutional Monarchy","centre",
+         "stable",          '["ASEAN"]',                  "Paetongtarn Shinawatra","Prime Minister",
+         '["Tourism economy","coup history","China-US balancing","political reform"]'),
+        ("VN", "VNM", 704, "Vietnam",          "Asia",     "Single-party State", "far_left",
+         "stable",          '["ASEAN"]',                  "To Lam",                "General Secretary",
+         '["South China Sea disputes","US-Vietnam trade","FDI growth","bamboo diplomacy"]'),
+        ("PH", "PHL", 608, "Philippines",      "Asia",     "Presidential Republic","right",
+         "stable",          '["ASEAN","US alliance"]',    "Ferdinand Marcos Jr.",  "President",
+         '["South China Sea standoffs","US base expansion","Duterte legacy","China relations"]'),
+        ("MY", "MYS", 458, "Malaysia",         "Asia",     "Constitutional Monarchy","centre",
+         "stable",          '["ASEAN","OIC"]',            "Anwar Ibrahim",         "Prime Minister",
+         '["ASEAN chair 2025","China-US balancing","digital economy","ethnic politics"]'),
+        ("AE", "ARE", 784, "UAE",              "Asia",     "Absolute Monarchy", "authoritarian",
+         "stable",          '["Arab League","OPEC+"]',    "Mohamed bin Zayed",     "President",
+         '["Finance hub","normalization with Israel","Iran relations","AI investment"]'),
+        ("QA", "QAT", 634, "Qatar",            "Asia",     "Absolute Monarchy", "authoritarian",
+         "stable",          '["Arab League","OPEC+"]',    "Tamim bin Hamad Al Thani","Emir",
+         '["Gaza mediation","LNG exports","US base","Hamas diplomacy"]'),
+        ("IL", "ISR", 376, "Israel",           "Asia",     "Parliamentary Democracy","centre_right",
+         "war",             '["Western allies"]',         "Isaac Herzog",          "President",
+         '["Gaza conflict","West Bank","Iran tensions"]'),
+    ]
+
+    # Deduplicate by iso2 (take first occurrence)
+    seen_iso2 = set()
+    unique_countries = []
+    for c in countries:
+        if c[0] not in seen_iso2:
+            seen_iso2.add(c[0])
+            unique_countries.append(c)
+
+    for row in unique_countries:
+        (iso2, iso3, iso_num, name, continent, gov_type, political_lean,
+         conflict_status, alliances, leader_name, leader_title, key_issues) = row
+        exists = cur.execute("SELECT 1 FROM countries WHERE iso2=?", (iso2,)).fetchone()
+        if not exists:
+            cur.execute(
+                """INSERT INTO countries
+                   (iso2, iso3, iso_num, name, continent, gov_type, political_lean,
+                    conflict_status, alliances, leader_name, leader_title, key_issues, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (iso2, iso3, iso_num, name, continent, gov_type, political_lean,
+                 conflict_status, alliances, leader_name, leader_title, key_issues, now),
+            )
+    conn.commit()
+    conn.close()
+    print(f"[DB] seed_countries complete — {len(unique_countries)} countries seeded.")

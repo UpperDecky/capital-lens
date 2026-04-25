@@ -12,7 +12,7 @@ import { useNavigate } from 'react-router-dom'
 import EntityAvatar from './EntityAvatar'
 import ImplicationRow from './ImplicationRow'
 import TagPill from './TagPill'
-import { formatAmount, formatDate, eventTypeLabel, JARGON } from '../lib/format'
+import { formatAmount, formatDateTime, eventTypeLabel, JARGON } from '../lib/format'
 
 /** Inline jargon tooltip — underline with definition on hover */
 function JargonText({ text }) {
@@ -126,8 +126,12 @@ export default function EventCard({ event, onTagClick, activeTag, selected, onSe
             )}
             <ImportanceBadge score={event.importance} />
           </div>
-          <p className="text-[10px] text-[#999] mt-0.5 font-light">
-            {event.source_name && `${event.source_name}  ·  `}{formatDate(event.occurred_at)}
+          <p className="text-[10px] text-[#999] mt-0.5 font-light flex items-center gap-1.5 flex-wrap">
+            {event.source_name && <span>{event.source_name}</span>}
+            {(event.occurred_at || event.ingested_at) && (
+              <><span className="text-[#ddd]">·</span>
+              <span>{formatDateTime(event.occurred_at || event.ingested_at)}</span></>
+            )}
           </p>
         </div>
 

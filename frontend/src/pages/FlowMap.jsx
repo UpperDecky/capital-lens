@@ -1,94 +1,103 @@
 /**
- * FlowMap — Obsidian-style knowledge graph of entity connections.
- *
- * Features:
- *  - Nodes: all entities, sized by market cap. Click to select.
- *  - Edges: typed (board, investment, partner, competitor, political_trade, etc.)
- *           each type has a distinct stroke style (solid/dashed/dotted).
- *  - Selection: clicking a node highlights it + all direct connections,
- *               fades unconnected nodes/edges (exactly like Obsidian).
- *  - Edge hover: shows a tooltip with the edge label.
- *  - Info panel: selected node details in bottom-left corner.
- *  - Sector filter + entity type filter.
- *  - Zoom + pan + drag nodes.
- * D3 is used ONLY on this page (spec requirement).
+ * FlowMap - dark-canvas entity connection graph.
+ * D3 force simulation, curved bezier edges, vivid sector colors, SVG glow filters.
  */
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import * as d3 from 'd3'
 import { formatAmount } from '../lib/format'
 
-const BASE = ''
-const SECTORS = [
-  'Technology', 'Finance', 'E-Commerce', 'Energy',
-  'Healthcare', 'Defense', 'Aerospace', 'Retail', 'Automotive', 'Government',
-]
+// ---- Design tokens ---------------------------------------------------------------
 
-// ── Edge type visual styles ──────────────────────────────────────────────────
-const EDGE_STYLES = {
-  board:              { dash: 'none',    stroke: '#111', label: 'Control / Board'    },
-  investment:         { dash: 'none',    stroke: '#555', label: 'Investment'          },
-  acquisition:        { dash: 'none',    stroke: '#333', label: 'Acquisition'         },
-  partner:            { dash: '6,3',     stroke: '#777', label: 'Partnership'         },
-  competitor:         { dash: '3,3',     stroke: '#aaa', label: 'Competitor'          },
-  customer:           { dash: '8,4',     stroke: '#888', label: 'Customer'            },
-  supplier:           { dash: '8,4',     stroke: '#888', label: 'Supplier'            },
-  political_trade:    { dash: '4,2,1,2', stroke: '#444', label: 'Political Trade'     },
-  political:          { dash: '4,2',     stroke: '#666', label: 'Political'           },
-  congressional_trade:{ dash: '4,2,1,2', stroke: '#444', label: 'Congressional Trade' },
-  investor:           { dash: 'none',    stroke: '#555', label: 'Investment'          },
-  subsidiary:         { dash: 'none',    stroke: '#333', label: 'Subsidiary'          },
+const SECTOR_COLOR = {
+  Technology:   '#818cf8',
+  Finance:      '#60a5fa',
+  'E-Commerce': '#22d3ee',
+  Energy:       '#fbbf24',
+  Healthcare:   '#34d399',
+  Defense:      '#f87171',
+  Aerospace:    '#c084fc',
+  Retail:       '#f472b6',
+  Automotive:   '#fb923c',
+  Government:   '#94a3b8',
 }
 
-// ── Sector node fill shades ──────────────────────────────────────────────────
-const SECTOR_FILL = {
-  Technology:   '#222',
-  Finance:      '#3a3a3a',
-  'E-Commerce': '#444',
-  Energy:       '#555',
-  Healthcare:   '#4a4a4a',
-  Defense:      '#333',
-  Aerospace:    '#2a2a2a',
-  Retail:       '#5a5a5a',
-  Automotive:   '#484848',
-  Government:   '#666',
+const SECTORS = Object.keys(SECTOR_COLOR)
+
+const EDGE_META = {
+  board:               { stroke: '#e2e8f0', dash: 'none',    label: 'Board / Control'    },
+  investment:          { stroke: '#60a5fa', dash: 'none',    label: 'Investment'          },
+  acquisition:         { stroke: '#a78bfa', dash: 'none',    label: 'Acquisition'         },
+  partner:             { stroke: '#34d399', dash: '6,3',     label: 'Partnership'         },
+  competitor:          { stroke: '#f87171', dash: '3,3',     label: 'Competitor'          },
+  customer:            { stroke: '#fbbf24', dash: '8,4',     label: 'Customer'            },
+  supplier:            { stroke: '#fb923c', dash: '8,4',     label: 'Supplier'            },
+  political_trade:     { stroke: '#f472b6', dash: '4,2,1,2', label: 'Political Trade'     },
+  political:           { stroke: '#94a3b8', dash: '4,2',     label: 'Political'           },
+  congressional_trade: { stroke: '#f472b6', dash: '4,2,1,2', label: 'Congressional Trade' },
+  investor:            { stroke: '#60a5fa', dash: 'none',    label: 'Investment'          },
+  subsidiary:          { stroke: '#a78bfa', dash: 'none',    label: 'Subsidiary'          },
 }
+
+function edgeMeta(type) {
+  return EDGE_META[type] || { stroke: '#475569', dash: '4,2', label: type || 'Linked' }
+}
+
+function bezierPath(sx, sy, tx, ty) {
+  const dx = tx - sx
+  const dy = ty - sy
+  const mx = (sx + tx) / 2 - dy * 0.18
+  const my = (sy + ty) / 2 + dx * 0.18
+  return `M${sx},${sy} Q${mx},${my} ${tx},${ty}`
+}
+
+// ---- Panel sub-components --------------------------------------------------------
+
+function PanelSection({ title, children }) {
+  return (
+    <div className="px-5 py-4 border-b border-[#f0f0f0]">
+      <p className="text-[9px] font-bold uppercase tracking-[0.1em] text-[#bbb] mb-3">{title}</p>
+      {children}
+    </div>
+  )
+}
+
+// ---- Main component --------------------------------------------------------------
 
 export default function FlowMap() {
   const svgRef   = useRef(null)
   const wrapRef  = useRef(null)
   const simRef   = useRef(null)
+  const zoomRef  = useRef(null)
   const navigate = useNavigate()
 
-  const [data,          setData]         = useState(null)
-  const [loading,       setLoading]      = useState(true)
-  const [error,         setError]        = useState(null)
-  const [sectorFilter,  setSectorFilter] = useState('')
-  const [typeFilter,    setTypeFilter]   = useState('')
-  const [selectedNode,  setSelectedNode] = useState(null)
-  const [edgeTooltip,      setEdgeTooltip]      = useState(null)
-  const [nodeTooltip,      setNodeTooltip]      = useState(null)
-  const [portfolio,        setPortfolio]        = useState(null)
+  const [data,             setData]            = useState(null)
+  const [loading,          setLoading]         = useState(true)
+  const [error,            setError]           = useState(null)
+  const [sectorFilter,     setSectorFilter]    = useState('')
+  const [typeFilter,       setTypeFilter]      = useState('')
+  const [selectedNode,     setSelectedNode]    = useState(null)
+  const [searchTerm,       setSearchTerm]      = useState('')
+  const [edgeTooltip,      setEdgeTooltip]     = useState(null)
+  const [portfolio,        setPortfolio]       = useState(null)
   const [portfolioLoading, setPortfolioLoading] = useState(false)
 
-  // Fetch portfolio when a node is selected
   useEffect(() => {
     if (!selectedNode) { setPortfolio(null); return }
     setPortfolioLoading(true)
-    fetch(`${BASE}/entities/${selectedNode.id}/portfolio`)
+    fetch(`/entities/${selectedNode.id}/portfolio`)
       .then(r => r.json())
       .then(d => setPortfolio(d))
       .catch(() => setPortfolio(null))
       .finally(() => setPortfolioLoading(false))
   }, [selectedNode])
 
-  // Fetch flow data
   const fetchFlow = useCallback(() => {
     setLoading(true)
     const qs = new URLSearchParams()
     if (sectorFilter) qs.set('sector', sectorFilter)
     if (typeFilter)   qs.set('type', typeFilter)
-    fetch(`${BASE}/flow${qs.toString() ? '?' + qs : ''}`)
+    fetch(`/flow${qs.toString() ? '?' + qs : ''}`)
       .then(r => r.json())
       .then(d => { setData(d); setError(null) })
       .catch(e => setError(e.message))
@@ -96,58 +105,32 @@ export default function FlowMap() {
   }, [sectorFilter, typeFilter])
 
   useEffect(() => { fetchFlow() }, [fetchFlow])
-  useEffect(() => { setSelectedNode(null) }, [sectorFilter, typeFilter])
+  useEffect(() => { setSelectedNode(null); setSearchTerm('') }, [sectorFilter, typeFilter])
 
-  // ── D3 render ───────────────────────────────────────────────────────────────
+  function handleResetZoom() {
+    if (!svgRef.current || !zoomRef.current) return
+    d3.select(svgRef.current)
+      .transition().duration(500)
+      .call(zoomRef.current.transform, d3.zoomIdentity)
+  }
+
+  // ---- D3 render -----------------------------------------------------------------
   useEffect(() => {
     if (!data || loading || !svgRef.current || !wrapRef.current) return
 
     const { nodes: rawNodes, edges: rawEdges } = data
     const rect = wrapRef.current.getBoundingClientRect()
-    const w = (rect.width  > 0 ? rect.width  : wrapRef.current.clientWidth)  || 1000
-    const h = (rect.height > 0 ? rect.height : wrapRef.current.clientHeight) || 600
+    const w = (rect.width  > 0 ? rect.width  : 1000)
+    const h = (rect.height > 0 ? rect.height : 600)
 
-    // Clone so D3 can mutate freely
     const nodes = rawNodes.map(n => ({ ...n }))
-    const nodeById = Object.fromEntries(nodes.map(n => [n.id, n]))
-
-    // Only include edges where both endpoints are in current node set
     const nodeIds = new Set(nodes.map(n => n.id))
     const edges = rawEdges
       .filter(e => nodeIds.has(e.source) && nodeIds.has(e.target))
       .map(e => ({ ...e }))
 
-    // ── SVG setup ──────────────────────────────────────────────────────────
-    const svg = d3.select(svgRef.current)
-    svg.selectAll('*').remove()
-    svg.attr('viewBox', `0 0 ${w} ${h}`)
-
-    // Zoom behaviour
-    const g = svg.append('g')
-    const zoom = d3.zoom()
-      .scaleExtent([0.15, 6])
-      .on('zoom', ({ transform }) => g.attr('transform', transform))
-    svg.call(zoom)
-    svg.on('click', (event) => {
-      if (event.target === svgRef.current) setSelectedNode(null)
-    })
-
-    // Faint grid
-    const grid = g.append('g').attr('class', 'grid')
-    for (let x = 0; x < w * 3; x += 48)
-      grid.append('line').attr('x1', x - w).attr('y1', -h).attr('x2', x - w).attr('y2', h * 3)
-        .attr('stroke', '#f2f2f2').attr('stroke-width', 0.5)
-    for (let y = 0; y < h * 3; y += 48)
-      grid.append('line').attr('x1', -w).attr('y1', y - h).attr('x2', w * 3).attr('y2', y - h)
-        .attr('stroke', '#f2f2f2').attr('stroke-width', 0.5)
-
-    // Radius scale
-    const maxWorth = d3.max(nodes, d => d.net_worth || 0) || 1
-    const rScale = d3.scaleSqrt().domain([0, maxWorth]).range([5, 30])
-
-    // ── Build adjacency for highlight logic ────────────────────────────────
-    const adjacency = {}  // node_id → Set of neighbor ids
-    const edgesByNode = {} // node_id → [edge indices]
+    const adjacency = {}
+    const edgesByNode = {}
     nodes.forEach(n => { adjacency[n.id] = new Set(); edgesByNode[n.id] = [] })
     edges.forEach((e, i) => {
       const sid = typeof e.source === 'object' ? e.source.id : e.source
@@ -158,189 +141,218 @@ export default function FlowMap() {
       edgesByNode[tid]?.push(i)
     })
 
-    // ── Arrow markers (one per edge type) ─────────────────────────────────
+    // SVG setup
+    const svg = d3.select(svgRef.current)
+    svg.selectAll('*').remove()
+    svg.attr('viewBox', `0 0 ${w} ${h}`)
+
+    // Glow filter defs
     const defs = svg.append('defs')
-    Object.entries(EDGE_STYLES).forEach(([type, style]) => {
-      defs.append('marker')
-        .attr('id', `arrow-${type}`)
-        .attr('markerWidth', 6).attr('markerHeight', 6)
-        .attr('refX', 6).attr('refY', 3)
-        .attr('orient', 'auto')
-        .append('path')
-        .attr('d', 'M0,0 L0,6 L6,3 z')
-        .attr('fill', style.stroke)
-        .attr('opacity', 0.6)
+    ;[['glow-soft', 3], ['glow-strong', 8]].forEach(([id, dev]) => {
+      const f = defs.append('filter')
+        .attr('id', id)
+        .attr('x', '-60%').attr('y', '-60%')
+        .attr('width', '220%').attr('height', '220%')
+      f.append('feGaussianBlur').attr('stdDeviation', dev).attr('result', 'blur')
+      const merge = f.append('feMerge')
+      merge.append('feMergeNode').attr('in', 'blur')
+      merge.append('feMergeNode').attr('in', 'SourceGraphic')
     })
 
-    // ── Edge layer ─────────────────────────────────────────────────────────
+    // Zoom + pan
+    const g = svg.append('g')
+    const zoom = d3.zoom()
+      .scaleExtent([0.1, 8])
+      .on('zoom', ({ transform }) => g.attr('transform', transform))
+    svg.call(zoom)
+    zoomRef.current = zoom
+    svg.on('click', ev => { if (ev.target === svgRef.current) setSelectedNode(null) })
+
+    const maxWorth = d3.max(nodes, d => d.net_worth || 0) || 1
+    const rScale = d3.scaleSqrt().domain([0, maxWorth]).range([7, 32])
+
+    // Edges
     const edgeGroup = g.append('g').attr('class', 'edges')
-    const edgeSel = edgeGroup.selectAll('line')
+    const edgeSel = edgeGroup.selectAll('path.fl-edge')
       .data(edges)
-      .join('line')
-      .attr('stroke', d => (EDGE_STYLES[d.type] || EDGE_STYLES.partner).stroke)
-      .attr('stroke-width', d => Math.max(0.8, (d.weight || 1) * 0.6))
-      .attr('stroke-dasharray', d => (EDGE_STYLES[d.type] || EDGE_STYLES.partner).dash)
-      .attr('opacity', 0.55)
-      .attr('marker-end', d => `url(#arrow-${d.type})`)
+      .join('path')
+      .attr('class', 'fl-edge')
+      .attr('fill', 'none')
+      .attr('stroke', d => edgeMeta(d.type).stroke)
+      .attr('stroke-width', d => Math.max(0.8, (d.weight || 1) * 0.65))
+      .attr('stroke-dasharray', d => {
+        const dash = edgeMeta(d.type).dash
+        return dash === 'none' ? null : dash
+      })
+      .attr('opacity', 0.28)
       .attr('cursor', 'crosshair')
-      .on('mouseenter', function (event, d) {
-        d3.select(this).attr('opacity', 1).attr('stroke-width', d => Math.max(1.5, (d.weight || 1) * 0.9))
-        setEdgeTooltip({ label: d.label, type: d.type, x: event.pageX, y: event.pageY })
+      .on('mouseenter', function(event, d) {
+        d3.select(this).attr('opacity', 1).attr('stroke-width', 2)
+        setEdgeTooltip({ label: d.label, type: d.type, confidence: d.confidence, x: event.pageX, y: event.pageY })
       })
-      .on('mousemove', (event) => {
-        setEdgeTooltip(t => t ? { ...t, x: event.pageX, y: event.pageY } : t)
-      })
-      .on('mouseleave', function (event, d) {
+      .on('mousemove', ev => setEdgeTooltip(t => t ? { ...t, x: ev.pageX, y: ev.pageY } : t))
+      .on('mouseleave', function(event, d) {
         d3.select(this)
-          .attr('opacity', 0.55)
-          .attr('stroke-width', Math.max(0.8, (d.weight || 1) * 0.6))
+          .attr('opacity', 0.28)
+          .attr('stroke-width', Math.max(0.8, (d.weight || 1) * 0.65))
         setEdgeTooltip(null)
       })
 
-    // ── Node layer ─────────────────────────────────────────────────────────
+    // Nodes
     const nodeGroup = g.append('g').attr('class', 'nodes')
-    const nodeSel = nodeGroup.selectAll('g')
+    const nodeSel = nodeGroup.selectAll('g.fl-node')
       .data(nodes)
       .join('g')
+      .attr('class', 'fl-node')
       .attr('cursor', 'pointer')
       .call(d3.drag()
-        .on('start', (ev, d) => { if (!ev.active) simRef.current?.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y })
+        .on('start', (ev, d) => {
+          if (!ev.active) simRef.current?.alphaTarget(0.3).restart()
+          d.fx = d.x; d.fy = d.y
+        })
         .on('drag',  (ev, d) => { d.fx = ev.x; d.fy = ev.y })
-        .on('end',   (ev, d) => { if (!ev.active) simRef.current?.alphaTarget(0); d.fx = null; d.fy = null })
+        .on('end',   (ev, d) => {
+          if (!ev.active) simRef.current?.alphaTarget(0)
+          d.fx = null; d.fy = null
+        })
       )
-      .on('click', (event, d) => {
-        event.stopPropagation()
+      .on('click', (ev, d) => {
+        ev.stopPropagation()
         setSelectedNode(prev => prev?.id === d.id ? null : d)
-        setNodeTooltip(null)
       })
-      .on('dblclick', (event, d) => {
-        event.stopPropagation()
+      .on('dblclick', (ev, d) => {
+        ev.stopPropagation()
         navigate(`/entities/${d.id}`)
       })
-      .on('mouseenter', (event, d) => {
-        setNodeTooltip({ ...d, x: event.pageX, y: event.pageY })
-      })
-      .on('mousemove', (event) => {
-        setNodeTooltip(t => t ? { ...t, x: event.pageX, y: event.pageY } : t)
-      })
-      .on('mouseleave', () => setNodeTooltip(null))
 
-    // Node circles
-    nodeSel.append('circle')
+    // Halo (ambient glow ring)
+    nodeSel.append('circle').attr('class', 'node-halo')
+      .attr('r', d => rScale(d.net_worth || 0) + 10)
+      .attr('fill', d => SECTOR_COLOR[d.sector] || '#818cf8')
+      .attr('opacity', 0.07)
+      .attr('pointer-events', 'none')
+
+    // Main filled circle
+    nodeSel.append('circle').attr('class', 'node-circle')
       .attr('r', d => rScale(d.net_worth || 0))
-      .attr('fill', d => SECTOR_FILL[d.sector] || '#555')
-      .attr('stroke', '#fff')
-      .attr('stroke-width', 1)
+      .attr('fill', d => SECTOR_COLOR[d.sector] || '#818cf8')
+      .attr('stroke', '#0d1117')
+      .attr('stroke-width', 1.5)
+      .attr('filter', 'url(#glow-soft)')
 
-    // Node labels (abbreviate for smaller nodes)
-    nodeSel.append('text')
+    // Pulse ring (shown + animated on selection)
+    nodeSel.append('circle').attr('class', 'node-ring')
+      .attr('r', d => rScale(d.net_worth || 0) + 6)
+      .attr('fill', 'none')
+      .attr('stroke', d => SECTOR_COLOR[d.sector] || '#818cf8')
+      .attr('stroke-width', 1.5)
+      .attr('opacity', 0)
+      .attr('pointer-events', 'none')
+
+    // External label
+    nodeSel.append('text').attr('class', 'node-label')
       .text(d => {
         const r = rScale(d.net_worth || 0)
-        if (r > 18) return d.name.split(' ')[0]
-        if (r > 12) return d.name.split(' ')[0].slice(0, 4)
+        const words = d.name.split(' ')
+        if (r > 20) return words.slice(0, 2).join(' ')
+        if (r > 11) return words[0].slice(0, 7)
         return ''
       })
       .attr('text-anchor', 'middle')
-      .attr('dy', '0.35em')
-      .attr('font-size', d => Math.min(rScale(d.net_worth || 0) * 0.55, 11))
-      .attr('font-family', '"IBM Plex Mono", monospace')
-      .attr('fill', '#fff')
+      .attr('dy', d => rScale(d.net_worth || 0) + 14)
+      .attr('font-size', 8.5)
+      .attr('font-family', '"IBM Plex Mono", "Courier New", monospace')
+      .attr('fill', '#64748b')
+      .attr('letter-spacing', '0.03em')
       .attr('pointer-events', 'none')
 
-    // ── Force simulation ───────────────────────────────────────────────────
+    // Force simulation
     const sim = d3.forceSimulation(nodes)
-      .force('link',    d3.forceLink(edges).id(d => d.id).distance(d => 80 + (5 - (d.weight || 2)) * 15).strength(0.2))
-      .force('charge',  d3.forceManyBody().strength(d => -120 - rScale(d.net_worth || 0) * 3))
+      .force('link',    d3.forceLink(edges).id(d => d.id)
+        .distance(d => 95 + (5 - (d.weight || 2)) * 20)
+        .strength(0.18))
+      .force('charge',  d3.forceManyBody().strength(d => -170 - rScale(d.net_worth || 0) * 3.5))
       .force('center',  d3.forceCenter(w / 2, h / 2))
-      .force('collide', d3.forceCollide(d => rScale(d.net_worth || 0) + 8))
+      .force('collide', d3.forceCollide(d => rScale(d.net_worth || 0) + 14))
       .on('tick', () => {
-        edgeSel
-          .attr('x1', d => (d.source.x || 0))
-          .attr('y1', d => (d.source.y || 0))
-          .attr('x2', d => {
-            const r = rScale((typeof d.target === 'object' ? d.target.net_worth : 0) || 0)
-            const dx = (d.target.x || 0) - (d.source.x || 0)
-            const dy = (d.target.y || 0) - (d.source.y || 0)
-            const dist = Math.sqrt(dx * dx + dy * dy) || 1
-            return (d.target.x || 0) - (dx / dist) * (r + 4)
-          })
-          .attr('y2', d => {
-            const r = rScale((typeof d.target === 'object' ? d.target.net_worth : 0) || 0)
-            const dx = (d.target.x || 0) - (d.source.x || 0)
-            const dy = (d.target.y || 0) - (d.source.y || 0)
-            const dist = Math.sqrt(dx * dx + dy * dy) || 1
-            return (d.target.y || 0) - (dy / dist) * (r + 4)
-          })
+        edgeSel.attr('d', d => bezierPath(
+          d.source.x || 0, d.source.y || 0,
+          d.target.x || 0, d.target.y || 0,
+        ))
         nodeSel.attr('transform', d => `translate(${d.x || 0},${d.y || 0})`)
       })
     simRef.current = sim
 
-    // ── Highlight on selectedNode change ──────────────────────────────────
-    // We run this reactively via a separate effect (see below)
-    // Store accessor fns on the elements for the highlight effect to call
-    svgRef.current.__edgeSel = edgeSel
-    svgRef.current.__nodeSel = nodeSel
-    svgRef.current.__adjacency = adjacency
+    // Store refs for reactive highlight effect
+    svgRef.current.__edgeSel     = edgeSel
+    svgRef.current.__nodeSel     = nodeSel
+    svgRef.current.__adjacency   = adjacency
     svgRef.current.__edgesByNode = edgesByNode
-    svgRef.current.__rScale = rScale
-    svgRef.current.__edges = edges
+    svgRef.current.__edges       = edges
+    svgRef.current.__rScale      = rScale
 
     return () => sim.stop()
   }, [data, loading, navigate]) // eslint-disable-line
 
-  // ── Highlight effect (runs whenever selectedNode changes) ─────────────────
+  // ---- Highlight / spotlight effect -----------------------------------------------
   useEffect(() => {
     if (!svgRef.current) return
     const edgeSel     = svgRef.current.__edgeSel
     const nodeSel     = svgRef.current.__nodeSel
     const adjacency   = svgRef.current.__adjacency
     const edgesByNode = svgRef.current.__edgesByNode
-    const rScale      = svgRef.current.__rScale
     if (!edgeSel || !nodeSel) return
 
-    if (!selectedNode) {
-      // Reset all to default
-      nodeSel.select('circle')
-        .attr('fill', d => SECTOR_FILL[d.sector] || '#555')
-        .attr('stroke', '#fff')
-        .attr('stroke-width', 1)
-        .attr('opacity', 1)
-      nodeSel.select('text').attr('opacity', 1)
-      edgeSel.attr('opacity', 0.55)
-      return
-    }
+    const connectedIds      = selectedNode ? (adjacency[selectedNode.id] || new Set()) : new Set()
+    const connectedEdgeIdxs = selectedNode ? new Set(edgesByNode[selectedNode.id] || []) : new Set()
+    const hasSearch = searchTerm.trim().length > 0
+    const lc = searchTerm.trim().toLowerCase()
 
-    const connectedIds = adjacency[selectedNode.id] || new Set()
-    const connectedEdgeIdxs = new Set(edgesByNode[selectedNode.id] || [])
-
-    // Dim / highlight nodes
-    nodeSel.select('circle')
-      .attr('fill', d => {
-        if (d.id === selectedNode.id) return '#111'
-        if (connectedIds.has(d.id)) return SECTOR_FILL[d.sector] || '#555'
-        return '#ccc'
+    nodeSel.select('.node-circle')
+      .attr('opacity', d => {
+        if (hasSearch) return d.name.toLowerCase().includes(lc) ? 1 : 0.06
+        if (!selectedNode) return 1
+        return (d.id === selectedNode.id || connectedIds.has(d.id)) ? 1 : 0.1
       })
-      .attr('stroke', d => d.id === selectedNode.id ? '#000' : '#fff')
-      .attr('stroke-width', d => d.id === selectedNode.id ? 2 : 1)
-      .attr('opacity', d =>
-        d.id === selectedNode.id || connectedIds.has(d.id) ? 1 : 0.18
-      )
-    nodeSel.select('text')
-      .attr('opacity', d =>
-        d.id === selectedNode.id || connectedIds.has(d.id) ? 1 : 0.1
+      .attr('filter', d =>
+        d.id === selectedNode?.id ? 'url(#glow-strong)' : 'url(#glow-soft)'
       )
 
-    // Dim / highlight edges
+    nodeSel.select('.node-halo')
+      .attr('opacity', d => {
+        if (hasSearch) return d.name.toLowerCase().includes(lc) ? 0.2 : 0.02
+        if (!selectedNode) return 0.07
+        return (d.id === selectedNode.id || connectedIds.has(d.id)) ? 0.2 : 0.02
+      })
+
+    nodeSel.select('.node-label')
+      .attr('opacity', d => {
+        if (hasSearch) return d.name.toLowerCase().includes(lc) ? 1 : 0.08
+        if (!selectedNode) return 0.75
+        return (d.id === selectedNode.id || connectedIds.has(d.id)) ? 1 : 0.07
+      })
+      .attr('fill', d => {
+        if (d.id === selectedNode?.id) return '#e2e8f0'
+        return '#64748b'
+      })
+
+    nodeSel.select('.node-ring')
+      .attr('opacity', d => d.id === selectedNode?.id ? 0.85 : 0)
+      .each(function(d) {
+        d3.select(this).classed('is-pulsing', d.id === selectedNode?.id)
+      })
+
     edgeSel
-      .attr('opacity', (d, i) => connectedEdgeIdxs.has(i) ? 0.85 : 0.05)
-      .attr('stroke-width', (d, i) =>
-        connectedEdgeIdxs.has(i) ? Math.max(1.5, (d.weight || 1) * 0.9) : 0.5
-      )
-  }, [selectedNode])
-
-  const connectedNodes = selectedNode && svgRef.current?.__adjacency
-    ? [...(svgRef.current.__adjacency[selectedNode.id] || new Set())]
-    : []
+      .attr('opacity', (d, i) => {
+        if (hasSearch) return 0.06
+        if (!selectedNode) return 0.28
+        return connectedEdgeIdxs.has(i) ? 0.9 : 0.04
+      })
+      .attr('stroke-width', (d, i) => {
+        if (hasSearch || !selectedNode) return Math.max(0.8, (d.weight || 1) * 0.65)
+        return connectedEdgeIdxs.has(i) ? Math.max(1.5, (d.weight || 1)) : 0.5
+      })
+  }, [selectedNode, searchTerm])
 
   const connectedEdges = selectedNode && svgRef.current?.__edges
     ? svgRef.current.__edges.filter((_, i) =>
@@ -348,295 +360,471 @@ export default function FlowMap() {
       )
     : []
 
+  const uniqueEdgeTypes = Object.entries(EDGE_META)
+    .filter(([, s], i, arr) => arr.findIndex(([, x]) => x.label === s.label) === i)
+
   return (
     <div className="flex flex-col h-full overflow-hidden">
 
-      {/* ── Header ──────────────────────────────────────────────────────── */}
-      <div className="px-6 py-5 border-b border-[#e0e0e0] flex items-center justify-between flex-shrink-0">
-        <div>
-          <p className="label text-[#999] mb-0.5">Capital Lens</p>
-          <h1 className="text-xl font-bold tracking-tight text-[#111]">Connection Map</h1>
-          {data && (
-            <p className="text-[10px] text-[#999] font-light mt-0.5">
-              {data.nodes.length} entities · {data.edges.length} connections · click a node to explore · double-click to profile
-            </p>
-          )}
+      {/* Pulse animation style */}
+      <style>{`
+        @keyframes cl-pulse {
+          0%   { transform: scale(1);   opacity: 0.75; }
+          100% { transform: scale(2.4); opacity: 0;    }
+        }
+        .node-ring.is-pulsing {
+          animation: cl-pulse 2s ease-out infinite;
+          transform-box: fill-box;
+          transform-origin: center;
+        }
+      `}</style>
+
+      {/* ---- Dark header -------------------------------------------------------- */}
+      <div className="flex items-center gap-2.5 px-4 h-11 bg-[#0d1117] border-b border-[#1e293b] flex-shrink-0">
+
+        {/* Logo + title */}
+        <div className="flex items-center gap-2 mr-1 flex-shrink-0">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <circle cx="3"  cy="3"  r="2.2" stroke="#818cf8" strokeWidth="1.2"/>
+            <circle cx="11" cy="3"  r="2.2" stroke="#60a5fa" strokeWidth="1.2"/>
+            <circle cx="7"  cy="11" r="2.2" stroke="#34d399" strokeWidth="1.2"/>
+            <line x1="5" y1="3"   x2="9"   y2="3"   stroke="#334155" strokeWidth="0.9"/>
+            <line x1="4" y1="4.5" x2="6.3" y2="9"   stroke="#334155" strokeWidth="0.9"/>
+            <line x1="10" y1="4.5" x2="7.7" y2="9"  stroke="#334155" strokeWidth="0.9"/>
+          </svg>
+          <span className="text-[11px] font-bold uppercase tracking-[0.1em] text-[#e2e8f0]">
+            Connection Map
+          </span>
         </div>
-        <div className="flex gap-2">
-          <select value={sectorFilter} onChange={e => setSectorFilter(e.target.value)}
-            className="px-3 py-1.5 text-xs font-medium uppercase tracking-[0.06em] border border-[#e0e0e0] bg-white text-[#666] focus:border-[#111] cursor-pointer">
-            <option value="">All Sectors</option>
-            {SECTORS.map(s => <option key={s} value={s}>{s}</option>)}
-          </select>
-          <select value={typeFilter} onChange={e => setTypeFilter(e.target.value)}
-            className="px-3 py-1.5 text-xs font-medium uppercase tracking-[0.06em] border border-[#e0e0e0] bg-white text-[#666] focus:border-[#111] cursor-pointer">
-            <option value="">Companies + People</option>
-            <option value="company">Companies only</option>
-            <option value="individual">People only</option>
-          </select>
+
+        {/* Stats pill */}
+        {data && (
+          <div className="hidden sm:flex items-center gap-2.5 px-2.5 py-1 bg-[#1e293b] flex-shrink-0">
+            <span className="text-[9px] font-mono text-[#64748b]">
+              <span className="text-[#94a3b8] font-bold">{data.nodes.length}</span> nodes
+            </span>
+            <span className="w-px h-3 bg-[#2d3f56]" />
+            <span className="text-[9px] font-mono text-[#64748b]">
+              <span className="text-[#94a3b8] font-bold">{data.edges.length}</span> edges
+            </span>
+          </div>
+        )}
+
+        <div className="flex-1" />
+
+        {/* Spotlight search */}
+        <div className="relative flex-shrink-0">
+          <svg width="11" height="11" viewBox="0 0 11 11" fill="none"
+            className="absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none text-[#475569]">
+            <circle cx="4.5" cy="4.5" r="3" stroke="currentColor" strokeWidth="1.2"/>
+            <line x1="7" y1="7" x2="10" y2="10" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/>
+          </svg>
+          <input
+            type="text"
+            value={searchTerm}
+            onChange={e => setSearchTerm(e.target.value)}
+            placeholder="Spotlight..."
+            className="pl-7 pr-3 py-1.5 w-36 text-[11px] bg-[#1e293b] text-[#e2e8f0] placeholder-[#475569] border border-[#2d3f56] focus:border-[#818cf8] focus:outline-none transition-colors"
+          />
         </div>
+
+        {/* Sector filter */}
+        <select
+          value={sectorFilter}
+          onChange={e => setSectorFilter(e.target.value)}
+          className="px-2.5 py-1.5 text-[10px] font-medium uppercase tracking-[0.05em] bg-[#1e293b] text-[#94a3b8] border border-[#2d3f56] focus:border-[#818cf8] focus:outline-none cursor-pointer"
+        >
+          <option value="">All Sectors</option>
+          {SECTORS.map(s => <option key={s} value={s}>{s}</option>)}
+        </select>
+
+        {/* Type filter */}
+        <select
+          value={typeFilter}
+          onChange={e => setTypeFilter(e.target.value)}
+          className="px-2.5 py-1.5 text-[10px] font-medium uppercase tracking-[0.05em] bg-[#1e293b] text-[#94a3b8] border border-[#2d3f56] focus:border-[#818cf8] focus:outline-none cursor-pointer"
+        >
+          <option value="">All Types</option>
+          <option value="company">Companies</option>
+          <option value="individual">People</option>
+        </select>
+
+        {/* Reset zoom */}
+        <button
+          onClick={handleResetZoom}
+          title="Reset zoom"
+          className="flex items-center justify-center w-7 h-7 bg-[#1e293b] border border-[#2d3f56] hover:border-[#818cf8] text-[#64748b] hover:text-[#818cf8] transition-colors flex-shrink-0"
+        >
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+            <path d="M1 4V1h3M11 4V1H8M1 8v3h3M11 8v3H8"
+              stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+        </button>
       </div>
 
-      {/* ── Main canvas area ────────────────────────────────────────────── */}
+      {/* ---- Main area ---------------------------------------------------------- */}
       <div className="flex flex-1 overflow-hidden">
 
-        {/* Graph */}
-        <div ref={wrapRef} className="relative flex-1 bg-white overflow-hidden">
+        {/* Canvas */}
+        <div
+          ref={wrapRef}
+          className="relative flex-1 overflow-hidden"
+          style={{
+            background: '#0d1117',
+            backgroundImage: 'radial-gradient(circle, #1e293b 1px, transparent 1px)',
+            backgroundSize: '28px 28px',
+          }}
+        >
           {loading && (
             <div className="absolute inset-0 flex items-center justify-center">
               <div className="text-center">
-                <div className="w-48 h-px bg-[#f0f0f0] relative overflow-hidden mb-3">
-                  <div className="absolute inset-y-0 w-1/4 bg-gradient-to-r from-transparent via-[#ccc] to-transparent animate-scan" />
+                <div className="w-48 h-px bg-[#1e293b] relative overflow-hidden mb-4">
+                  <div className="absolute inset-y-0 w-1/3 bg-gradient-to-r from-transparent via-[#818cf8] to-transparent animate-scan" />
                 </div>
-                <p className="text-[10px] font-medium uppercase tracking-[0.1em] text-[#bbb]">Building connection graph</p>
+                <p className="text-[9px] font-mono uppercase tracking-[0.14em] text-[#475569]">
+                  Mapping connections
+                </p>
               </div>
             </div>
           )}
+
           {error && (
             <div className="absolute inset-0 flex items-center justify-center">
-              <p className="text-xs text-[#999]">Cannot reach backend — start uvicorn on port 8000</p>
+              <div className="text-center">
+                <p className="text-[10px] font-mono text-[#f87171] uppercase tracking-wider mb-1">
+                  Connection Error
+                </p>
+                <p className="text-[9px] text-[#475569]">Start uvicorn on port 8000</p>
+              </div>
             </div>
           )}
+
           <svg ref={svgRef} className="w-full h-full" />
 
-          {/* Zoom hint */}
           {!loading && data && (
-            <p className="absolute bottom-3 right-4 text-[9px] font-medium uppercase tracking-[0.08em] text-[#ccc] pointer-events-none">
-              Scroll to zoom · Drag nodes · Click to select · Dbl-click to profile
+            <p className="absolute bottom-3 left-1/2 -translate-x-1/2 text-[9px] font-mono uppercase tracking-[0.1em] text-[#1e293b] pointer-events-none select-none whitespace-nowrap">
+              scroll to zoom &middot; drag nodes &middot; click to explore &middot; dbl-click for profile
             </p>
           )}
         </div>
 
-        {/* ── Right panel: legend + selected node info ─────────────────── */}
-        <div className="w-52 border-l border-[#e0e0e0] flex flex-col overflow-y-auto flex-shrink-0 bg-white">
+        {/* ---- Right panel ---------------------------------------------------- */}
+        <div className="w-72 border-l border-[#e8e8e8] bg-white flex flex-col overflow-hidden flex-shrink-0">
 
-          {/* Edge type legend */}
-          <div className="p-4 border-b border-[#e0e0e0]">
-            <p className="label text-[#bbb] mb-3">Connection Types</p>
-            <div className="space-y-2">
-              {Object.entries(EDGE_STYLES)
-                .filter(([, s], i, arr) => arr.findIndex(([, x]) => x.label === s.label) === i)
-                .map(([type, style]) => (
-                  <div key={type} className="flex items-center gap-2">
-                    <svg width="24" height="10" className="flex-shrink-0">
-                      <line x1="0" y1="5" x2="24" y2="5"
-                        stroke={style.stroke}
-                        strokeWidth="1.5"
-                        strokeDasharray={style.dash === 'none' ? undefined : style.dash}
-                      />
-                    </svg>
-                    <span className="text-[9px] font-medium uppercase tracking-[0.06em] text-[#666] leading-none">
-                      {style.label}
-                    </span>
+          {selectedNode ? (
+
+            /* Selected node panel */
+            <div className="flex flex-col overflow-y-auto h-full">
+
+              {/* Entity header */}
+              <div className="px-5 pt-5 pb-4 border-b border-[#f0f0f0]">
+                <div className="flex items-start gap-3">
+                  {/* Sector dot with glow */}
+                  <div
+                    className="w-3 h-3 rounded-full flex-shrink-0 mt-1"
+                    style={{
+                      background: SECTOR_COLOR[selectedNode.sector] || '#94a3b8',
+                      boxShadow: `0 0 10px ${SECTOR_COLOR[selectedNode.sector] || '#94a3b8'}99`,
+                    }}
+                  />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-[13px] font-bold text-[#111] leading-snug tracking-tight">
+                      {selectedNode.name}
+                    </p>
+                    <p className="text-[9px] font-semibold uppercase tracking-[0.07em] text-[#aaa] mt-0.5">
+                      {selectedNode.type} &middot; {selectedNode.sector}
+                    </p>
                   </div>
-                ))}
-            </div>
-          </div>
-
-          {/* Sector legend */}
-          <div className="p-4 border-b border-[#e0e0e0]">
-            <p className="label text-[#bbb] mb-3">Sectors</p>
-            <div className="space-y-1.5">
-              {Object.entries(SECTOR_FILL).map(([sector, fill]) => (
-                <div key={sector} className="flex items-center gap-2">
-                  <div className="w-2.5 h-2.5 flex-shrink-0" style={{ background: fill }} />
-                  <span className="text-[9px] font-medium uppercase tracking-[0.06em] text-[#666] leading-none">{sector}</span>
+                  <button
+                    onClick={() => setSelectedNode(null)}
+                    className="text-[#ccc] hover:text-[#111] transition-colors flex-shrink-0 text-lg leading-none mt-0.5"
+                  >
+                    &times;
+                  </button>
                 </div>
-              ))}
-            </div>
-          </div>
 
-          {/* Selected node info + investment lean */}
-          {selectedNode && (
-            <div className="p-4 flex-1 overflow-y-auto">
-              <div className="flex items-center justify-between mb-3">
-                <p className="label text-[#bbb]">Selected</p>
-                <button onClick={() => setSelectedNode(null)}
-                  className="text-[10px] text-[#bbb] hover:text-[#111] transition-colors">×</button>
-              </div>
-
-              {/* Entity identity */}
-              <div className="mb-3 pb-3 border-b border-[#f0f0f0]">
-                <p className="text-sm font-bold text-[#111] tracking-tight leading-tight">{selectedNode.name}</p>
-                <p className="text-[10px] uppercase tracking-[0.06em] text-[#999] mt-0.5">
-                  {selectedNode.type} · {selectedNode.sector}
-                </p>
                 {selectedNode.net_worth > 0 && (
-                  <p className="font-mono text-xs font-bold text-[#111] mt-1">
+                  <p className="font-mono text-xs font-bold text-[#111] mt-3">
                     {formatAmount(selectedNode.net_worth)}
                   </p>
                 )}
                 {selectedNode.description && (
-                  <p className="text-[10px] text-[#666] font-light mt-2 leading-relaxed">
+                  <p className="text-[10px] text-[#777] font-light mt-2 leading-relaxed line-clamp-3">
                     {selectedNode.description}
                   </p>
                 )}
               </div>
 
-              {/* Investment lean — sector exposure */}
+              {/* Portfolio loading */}
               {portfolioLoading && (
-                <p className="text-[9px] uppercase tracking-[0.08em] text-[#ccc] mb-3">Loading portfolio…</p>
+                <div className="px-5 py-4 border-b border-[#f0f0f0]">
+                  <div className="flex items-center gap-2">
+                    <div className="w-24 h-px bg-[#f0f0f0] relative overflow-hidden">
+                      <div className="absolute inset-y-0 w-1/3 bg-gradient-to-r from-transparent via-[#ddd] to-transparent animate-scan" />
+                    </div>
+                    <p className="text-[9px] uppercase tracking-[0.1em] text-[#ccc]">Loading...</p>
+                  </div>
+                </div>
               )}
+
               {portfolio && !portfolioLoading && (
                 <>
-                  {/* Sector exposure bars */}
+                  {/* Investment lean with colored bars */}
                   {portfolio.sector_exposure?.length > 0 && (
-                    <div className="mb-3 pb-3 border-b border-[#f0f0f0]">
-                      <p className="label text-[#bbb] mb-2">Investment Lean</p>
-                      <div className="space-y-1.5">
+                    <PanelSection title="Investment Lean">
+                      <div className="space-y-2">
                         {(() => {
                           const max = Math.max(...portfolio.sector_exposure.map(s => s.count), 1)
                           return portfolio.sector_exposure.slice(0, 6).map(s => (
                             <div key={s.sector}>
-                              <div className="flex justify-between items-center mb-0.5">
-                                <span className="text-[8px] font-medium uppercase tracking-[0.05em] text-[#555]">
+                              <div className="flex justify-between items-center mb-1">
+                                <span className="text-[9px] font-medium uppercase tracking-[0.05em] text-[#555]">
                                   {s.sector}
                                 </span>
-                                <span className="text-[8px] font-mono text-[#999]">{s.count}</span>
+                                <span className="text-[9px] font-mono text-[#999]">{s.count}</span>
                               </div>
-                              <div className="h-1 bg-[#f0f0f0] w-full">
+                              <div className="h-0.5 bg-[#f0f0f0] w-full rounded-full overflow-hidden">
                                 <div
-                                  className="h-full bg-[#111] transition-all duration-300"
-                                  style={{ width: `${(s.count / max) * 100}%` }}
+                                  className="h-full rounded-full transition-all duration-500"
+                                  style={{
+                                    width: `${(s.count / max) * 100}%`,
+                                    background: SECTOR_COLOR[s.sector] || '#818cf8',
+                                  }}
                                 />
                               </div>
                             </div>
                           ))
                         })()}
                       </div>
-                    </div>
+                    </PanelSection>
                   )}
 
-                  {/* Event type breakdown */}
+                  {/* Activity mix */}
                   {portfolio.event_breakdown?.length > 0 && (
-                    <div className="mb-3 pb-3 border-b border-[#f0f0f0]">
-                      <p className="label text-[#bbb] mb-2">Activity Mix</p>
-                      <div className="space-y-1">
+                    <PanelSection title="Activity Mix">
+                      <div className="space-y-1.5">
                         {portfolio.event_breakdown.slice(0, 5).map(e => (
                           <div key={e.event_type} className="flex justify-between items-center">
-                            <span className="text-[8px] font-medium uppercase tracking-[0.05em] text-[#555]">
+                            <span className="text-[9px] font-medium uppercase tracking-[0.05em] text-[#555]">
                               {e.event_type.replace(/_/g, ' ')}
                             </span>
-                            <span className="text-[8px] font-mono font-bold text-[#111]">{e.count}</span>
+                            <span className="text-[9px] font-mono font-bold text-[#111]">{e.count}</span>
                           </div>
                         ))}
-                      </div>
-                      {portfolio.total_capital_tracked > 0 && (
-                        <div className="mt-2 pt-2 border-t border-[#f0f0f0]">
-                          <div className="flex justify-between items-center">
-                            <span className="text-[8px] font-medium uppercase tracking-[0.05em] text-[#999]">
+                        {portfolio.total_capital_tracked > 0 && (
+                          <div className="pt-1.5 mt-0.5 border-t border-[#f5f5f5] flex justify-between items-center">
+                            <span className="text-[9px] font-medium uppercase tracking-[0.05em] text-[#aaa]">
                               Capital Tracked
                             </span>
-                            <span className="text-[8px] font-mono font-bold text-[#111]">
+                            <span className="text-[9px] font-mono font-bold text-[#111]">
                               {formatAmount(portfolio.total_capital_tracked)}
                             </span>
                           </div>
-                        </div>
-                      )}
-                    </div>
+                        )}
+                      </div>
+                    </PanelSection>
                   )}
 
-                  {/* Congressional trade buy/sell split */}
+                  {/* Congress trades */}
                   {portfolio.congressional_trades?.total > 0 && (
-                    <div className="mb-3 pb-3 border-b border-[#f0f0f0]">
-                      <p className="label text-[#bbb] mb-2">Congress Trades</p>
+                    <PanelSection title="Congress Trades">
                       <div className="flex gap-2">
-                        <div className="flex-1 bg-[#f9f9f9] p-2 text-center">
-                          <p className="text-base font-bold text-[#111] font-mono">{portfolio.congressional_trades.buys}</p>
-                          <p className="text-[8px] uppercase tracking-[0.06em] text-[#22c55e]">Buys</p>
+                        <div className="flex-1 border border-[#f0f0f0] p-2.5 text-center">
+                          <p className="text-sm font-bold text-[#111] font-mono">
+                            {portfolio.congressional_trades.buys}
+                          </p>
+                          <p className="text-[8px] uppercase tracking-[0.08em] text-[#22c55e] mt-0.5">Buys</p>
                         </div>
-                        <div className="flex-1 bg-[#f9f9f9] p-2 text-center">
-                          <p className="text-base font-bold text-[#111] font-mono">{portfolio.congressional_trades.sells}</p>
-                          <p className="text-[8px] uppercase tracking-[0.06em] text-[#ef4444]">Sells</p>
+                        <div className="flex-1 border border-[#f0f0f0] p-2.5 text-center">
+                          <p className="text-sm font-bold text-[#111] font-mono">
+                            {portfolio.congressional_trades.sells}
+                          </p>
+                          <p className="text-[8px] uppercase tracking-[0.08em] text-[#ef4444] mt-0.5">Sells</p>
                         </div>
                       </div>
-                    </div>
+                    </PanelSection>
                   )}
 
-                  {/* Top events by amount */}
+                  {/* Largest moves */}
                   {portfolio.top_events?.length > 0 && (
-                    <div className="mb-3 pb-3 border-b border-[#f0f0f0]">
-                      <p className="label text-[#bbb] mb-2">Largest Moves</p>
-                      <div className="space-y-1.5">
+                    <PanelSection title="Largest Moves">
+                      <div className="space-y-2.5">
                         {portfolio.top_events.map((ev, i) => (
-                          <div key={i}>
-                            <p className="text-[9px] font-mono font-bold text-[#111]">
+                          <div key={i} className="flex items-start gap-2">
+                            <span className="text-[9px] font-mono font-bold text-[#111] flex-shrink-0 mt-0.5">
                               {formatAmount(ev.amount)}
-                            </p>
-                            <p className="text-[8px] text-[#666] leading-tight line-clamp-2">{ev.headline}</p>
+                            </span>
+                            <span className="text-[9px] text-[#666] leading-tight line-clamp-2">
+                              {ev.headline}
+                            </span>
                           </div>
                         ))}
                       </div>
-                    </div>
+                    </PanelSection>
                   )}
                 </>
               )}
 
-              {/* Connections list */}
+              {/* Connections */}
               {connectedEdges.length > 0 && (
-                <div className="mb-3">
-                  <p className="label text-[#bbb] mb-2">{connectedEdges.length} Connection{connectedEdges.length !== 1 ? 's' : ''}</p>
-                  <div className="space-y-1">
+                <PanelSection title={`${connectedEdges.length} Connection${connectedEdges.length !== 1 ? 's' : ''}`}>
+                  <div className="space-y-2.5">
                     {connectedEdges.slice(0, 8).map((edge, i) => {
-                      const otherId = (typeof edge.source === 'object' ? edge.source.id : edge.source) === selectedNode.id
-                        ? (typeof edge.target === 'object' ? edge.target.id : edge.target)
-                        : (typeof edge.source === 'object' ? edge.source.id : edge.source)
+                      const sid = typeof edge.source === 'object' ? edge.source.id : edge.source
+                      const tid = typeof edge.target === 'object' ? edge.target.id : edge.target
+                      const otherId = sid === selectedNode.id ? tid : sid
                       const other = data.nodes.find(n => n.id === otherId)
+                      const meta = edgeMeta(edge.type)
                       return (
-                        <div key={i} className="flex items-start gap-1.5">
-                          <svg width="12" height="10" className="flex-shrink-0 mt-0.5">
-                            <line x1="0" y1="5" x2="12" y2="5"
-                              stroke={(EDGE_STYLES[edge.type] || EDGE_STYLES.partner).stroke}
-                              strokeWidth="1.5"
-                              strokeDasharray={(EDGE_STYLES[edge.type] || EDGE_STYLES.partner).dash === 'none' ? undefined : (EDGE_STYLES[edge.type] || EDGE_STYLES.partner).dash}
-                            />
-                          </svg>
-                          <span className="text-[9px] text-[#444] leading-tight">
-                            <strong>{other?.name || 'Unknown'}</strong>
-                            <br />
-                            <span className="text-[#999]">{edge.label}</span>
-                          </span>
+                        <div key={i} className="flex items-start gap-2">
+                          <span
+                            className="flex-shrink-0 w-1.5 h-1.5 rounded-full mt-1.5"
+                            style={{ background: meta.stroke }}
+                          />
+                          <div className="min-w-0">
+                            <p className="text-[10px] font-semibold text-[#111] truncate">
+                              {other?.name || 'Unknown'}
+                            </p>
+                            <p className="text-[9px] text-[#999]">{edge.label || meta.label}</p>
+                          </div>
                         </div>
                       )
                     })}
                   </div>
-                </div>
+                </PanelSection>
               )}
 
-              <button
-                onClick={() => navigate(`/entities/${selectedNode.id}`)}
-                className="mt-2 w-full px-3 py-2 text-[10px] font-medium uppercase tracking-[0.08em] border border-[#111] text-[#111] hover:bg-[#111] hover:text-white transition-colors duration-200"
-              >
-                View Full Profile →
-              </button>
+              {/* CTA */}
+              <div className="px-5 py-4 mt-auto border-t border-[#f0f0f0]">
+                <button
+                  onClick={() => navigate(`/entities/${selectedNode.id}`)}
+                  className="w-full py-2.5 text-[10px] font-semibold uppercase tracking-[0.1em] border border-[#111] text-[#111] hover:bg-[#111] hover:text-white transition-all duration-200"
+                >
+                  View Full Profile
+                </button>
+              </div>
+            </div>
+
+          ) : (
+
+            /* Legend / idle state */
+            <div className="flex flex-col overflow-y-auto h-full">
+
+              {/* Panel intro */}
+              <div className="px-5 pt-5 pb-4 border-b border-[#f0f0f0]">
+                <p className="text-[9px] font-bold uppercase tracking-[0.1em] text-[#bbb] mb-1">
+                  Intelligence Layer
+                </p>
+                <p className="text-sm font-bold text-[#111] tracking-tight">Connection Map</p>
+                {data && (
+                  <p className="text-[10px] text-[#aaa] font-light mt-1">
+                    {data.nodes.length} entities &middot; {data.edges.length} connections
+                  </p>
+                )}
+                <p className="text-[9px] text-[#bbb] mt-3 leading-relaxed">
+                  Click any node to explore its network. Double-click to open a full profile.
+                </p>
+              </div>
+
+              {/* Sector legend */}
+              <PanelSection title="Sectors">
+                <div className="space-y-1.5">
+                  {Object.entries(SECTOR_COLOR).map(([sector, color]) => (
+                    <div key={sector} className="flex items-center gap-2.5">
+                      <span
+                        className="w-2 h-2 rounded-full flex-shrink-0"
+                        style={{ background: color, boxShadow: `0 0 5px ${color}99` }}
+                      />
+                      <span className="text-[9px] font-medium uppercase tracking-[0.05em] text-[#555]">
+                        {sector}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </PanelSection>
+
+              {/* Edge type legend */}
+              <PanelSection title="Connection Types">
+                <div className="space-y-2">
+                  {uniqueEdgeTypes.map(([type, meta]) => (
+                    <div key={type} className="flex items-center gap-2.5">
+                      <svg width="22" height="10" className="flex-shrink-0">
+                        <line x1="0" y1="5" x2="22" y2="5"
+                          stroke={meta.stroke}
+                          strokeWidth="1.5"
+                          strokeDasharray={meta.dash === 'none' ? undefined : meta.dash}
+                        />
+                      </svg>
+                      <span className="text-[9px] font-medium uppercase tracking-[0.05em] text-[#555]">
+                        {meta.label}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </PanelSection>
+
+              {/* Tips */}
+              <PanelSection title="How to use">
+                <div className="space-y-2">
+                  {[
+                    ['Spotlight', 'Type to isolate matching nodes'],
+                    ['Select',    'Click node to dim unrelated'],
+                    ['Profile',   'Double-click to open detail view'],
+                    ['Pin',       'Drag any node to anchor it'],
+                    ['Zoom',      'Scroll or pinch the canvas'],
+                    ['Reset',     'Use the icon in the toolbar'],
+                  ].map(([key, val]) => (
+                    <div key={key} className="flex items-start gap-2">
+                      <span className="text-[9px] font-bold uppercase tracking-[0.07em] text-[#ccc] flex-shrink-0 w-14">
+                        {key}
+                      </span>
+                      <span className="text-[9px] text-[#999]">{val}</span>
+                    </div>
+                  ))}
+                </div>
+              </PanelSection>
+
             </div>
           )}
         </div>
       </div>
 
-      {/* ── Edge tooltip ────────────────────────────────────────────────── */}
+      {/* Edge tooltip */}
       {edgeTooltip && (
-        <div className="fixed z-50 bg-[#111] border border-[#333] px-2.5 py-2 pointer-events-none"
-          style={{ left: edgeTooltip.x + 10, top: edgeTooltip.y - 36 }}>
-          <p className="text-[10px] font-medium uppercase tracking-[0.06em] text-[#999]">
-            {(EDGE_STYLES[edgeTooltip.type] || {}).label || edgeTooltip.type}
+        <div
+          className="fixed z-50 bg-[#0d1117] border border-[#1e293b] px-3 py-2 pointer-events-none"
+          style={{ left: edgeTooltip.x + 12, top: edgeTooltip.y - 48 }}
+        >
+          <p
+            className="text-[9px] font-bold uppercase tracking-[0.08em]"
+            style={{ color: edgeMeta(edgeTooltip.type).stroke }}
+          >
+            {edgeMeta(edgeTooltip.type).label}
           </p>
-          <p className="text-xs text-white font-light">{edgeTooltip.label}</p>
+          {edgeTooltip.label && (
+            <p className="text-[10px] text-[#94a3b8] mt-0.5">{edgeTooltip.label}</p>
+          )}
+          {edgeTooltip.confidence && (
+            <div className="flex items-center gap-1 mt-1.5">
+              <span
+                className="w-1.5 h-1.5 rounded-full"
+                style={{
+                  background: edgeTooltip.confidence === 'high' ? '#22c55e'
+                    : edgeTooltip.confidence === 'medium' ? '#f59e0b' : '#64748b',
+                }}
+              />
+              <span className="text-[8px] uppercase tracking-wider"
+                style={{
+                  color: edgeTooltip.confidence === 'high' ? '#22c55e'
+                    : edgeTooltip.confidence === 'medium' ? '#f59e0b' : '#64748b',
+                }}>
+                {edgeTooltip.confidence} confidence
+              </span>
+            </div>
+          )}
         </div>
       )}
 
-      {/* ── Node hover tooltip ───────────────────────────────────────────── */}
-      {nodeTooltip && !selectedNode && (
-        <div className="fixed z-50 bg-[#111] border border-[#333] px-3 py-2.5 pointer-events-none"
-          style={{ left: nodeTooltip.x + 14, top: nodeTooltip.y - 56 }}>
-          <p className="text-xs font-bold text-white tracking-tight">{nodeTooltip.name}</p>
-          <p className="text-[10px] uppercase tracking-[0.06em] text-[#999] mt-0.5">{nodeTooltip.sector}</p>
-          {nodeTooltip.net_worth > 0 && (
-            <p className="text-xs font-mono text-white mt-1">{formatAmount(nodeTooltip.net_worth)}</p>
-          )}
-          <p className="text-[9px] text-[#666] mt-1">Click to explore · Dbl-click for profile</p>
-        </div>
-      )}
     </div>
   )
 }

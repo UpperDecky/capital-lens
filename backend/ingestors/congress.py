@@ -15,11 +15,14 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 import httpx
 
-HOUSE_API_URL   = "https://housestockwatcher.com/api/transactions"
-SENATE_DATA_URL = (
-    "https://senate-stock-watcher-data.s3-us-west-2.amazonaws.com"
-    "/aggregate/all_transactions.json"
+# Primary: S3 mirror (more reliable than the live API which has DNS issues)
+# Fallback: live API endpoint
+HOUSE_S3_URL  = (
+    "https://house-stock-watcher-data.s3-us-east-1.amazonaws.com"
+    "/data/all_transactions.json"
 )
+HOUSE_API_URL = "https://housestockwatcher.com/api/transactions"
+# Senate S3 now returns 403 — omitted until a new source is available
 
 HEADERS = {
     "User-Agent": "CapitalLens research@capitallens.dev",
@@ -95,36 +98,24 @@ def _build_headline(rep: str, ticker: str, asset: str, trade_type: str) -> str:
 
 
 def _fetch_house_trades() -> list[dict]:
-    """Fetch House member trades from House Stock Watcher API."""
-    try:
-        with httpx.Client(headers=HEADERS, timeout=30, follow_redirects=True) as client:
-            resp = client.get(HOUSE_API_URL)
-            resp.raise_for_status()
-            data = resp.json()
-            if isinstance(data, list):
-                return data
-            # Some API versions wrap in {"data": [...]}
-            if isinstance(data, dict):
-                return data.get("data", [])
-    except Exception as exc:
-        print(f"[Congress/House] Fetch error: {exc}")
-    return []
-
-
-def _fetch_senate_trades() -> list[dict]:
-    """Fetch Senate member trades from Senate Stock Watcher data."""
-    try:
-        with httpx.Client(headers=HEADERS, timeout=30, follow_redirects=True) as client:
-            resp = client.get(SENATE_DATA_URL)
-            resp.raise_for_status()
-            data = resp.json()
-            # Senate data format may be a list of transactions
-            if isinstance(data, list):
-                return data[:200]  # cap — Senate file can be large
-            if isinstance(data, dict):
-                return data.get("data", [])[:200]
-    except Exception as exc:
-        print(f"[Congress/Senate] Fetch error: {exc}")
+    """Fetch House member trades — tries S3 mirror first, falls back to live API."""
+    for url, label in [(HOUSE_S3_URL, "S3"), (HOUSE_API_URL, "API")]:
+        try:
+            with httpx.Client(headers=HEADERS, timeout=30, follow_redirects=True) as client:
+                resp = client.get(url)
+                resp.raise_for_status()
+                data = resp.json()
+                if isinstance(data, list) and data:
+                    print(f"[Congress/House] Loaded {len(data)} records from {label}")
+                    return data[:500]
+                if isinstance(data, dict):
+                    rows = data.get("data", [])
+                    if rows:
+                        print(f"[Congress/House] Loaded {len(rows)} records from {label}")
+                        return rows[:500]
+        except Exception:
+            pass  # silently try next source
+    print("[Congress] All sources unavailable — skipping (housestockwatcher.com appears offline)")
     return []
 
 
@@ -137,8 +128,7 @@ def fetch_congressional_trades(db_conn: Any, entity_map: dict[str, str]) -> int:
     now = datetime.now(timezone.utc).isoformat()
     inserted = 0
 
-    # Combine House + Senate trades; process most recent first
-    all_trades = _fetch_house_trades() + _fetch_senate_trades()
+    all_trades = _fetch_house_trades()
     print(f"[Congress] Fetched {len(all_trades)} raw trade records")
 
     seen: set[str] = set()  # deduplicate within this batch

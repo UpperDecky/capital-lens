@@ -1,31 +1,40 @@
 import { useState, useEffect, useRef } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import EventCard from '../components/EventCard'
+import IntelCard from '../components/IntelCard'
 import EntityAvatar from '../components/EntityAvatar'
 import { NetworkEmpty } from '../components/Illustrations'
 import { api } from '../lib/api'
 import { formatAmount } from '../lib/format'
 
+function SectionHeader({ label, count }) {
+  return (
+    <div className="flex items-center gap-4 mb-4">
+      <p className="label text-[#999]">{label}</p>
+      <div className="flex-1 h-px bg-[#e0e0e0]" />
+      <p className="label text-[#ccc]">{count}</p>
+    </div>
+  )
+}
+
 export default function Search() {
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
-  const [query, setQuery] = useState(searchParams.get('q') || '')
+  const [query, setQuery]   = useState(searchParams.get('q') || '')
   const [results, setResults] = useState(null)
   const [loading, setLoading] = useState(false)
-  const [error, setError] = useState(null)
+  const [error, setError]     = useState(null)
   const inputRef = useRef(null)
 
-  // Auto-focus on mount
   useEffect(() => { inputRef.current?.focus() }, [])
 
-  // Run search when URL has ?q=
   useEffect(() => {
     const q = searchParams.get('q')
     if (q && q.length >= 2) {
       setQuery(q)
       doSearch(q)
     }
-  }, [])
+  }, []) // eslint-disable-line
 
   async function doSearch(q) {
     if (!q || q.length < 2) return
@@ -43,12 +52,18 @@ export default function Search() {
 
   function handleSubmit(e) {
     e.preventDefault()
-    if (query.trim().length < 2) return
-    setSearchParams({ q: query.trim() })
-    doSearch(query.trim())
+    const trimmed = query.trim()
+    if (trimmed.length < 2) return
+    setSearchParams({ q: trimmed })
+    doSearch(trimmed)
   }
 
-  const totalResults = results ? (results.entities?.length || 0) + (results.events?.length || 0) : 0
+  const totalResults = results
+    ? (results.entities?.length    || 0)
+    + (results.events?.length      || 0)
+    + (results.geo_events?.length  || 0)
+    + (results.predictions?.length || 0)
+    : 0
 
   return (
     <div className="max-w-3xl mx-auto px-6 py-10">
@@ -60,13 +75,16 @@ export default function Search() {
       </div>
 
       {/* Search bar */}
-      <form onSubmit={handleSubmit} className="flex gap-0 mb-8 border border-[#e0e0e0] focus-within:border-[#111] transition-colors duration-200">
+      <form
+        onSubmit={handleSubmit}
+        className="flex gap-0 mb-8 border border-[#e0e0e0] focus-within:border-[#111] transition-colors duration-200"
+      >
         <input
           ref={inputRef}
           type="text"
           value={query}
           onChange={e => setQuery(e.target.value)}
-          placeholder="Search events, entities, headlines…"
+          placeholder="Search events, entities, countries, predictions…"
           className="flex-1 bg-white px-4 py-3 text-sm text-[#111] focus:outline-none placeholder-[#bbb] font-light"
         />
         <button
@@ -91,22 +109,20 @@ export default function Search() {
       {/* Results */}
       {results && (
         <>
-          {/* Summary line */}
+          {/* Summary */}
           <div className="flex items-center gap-4 mb-6">
             <p className="label text-[#999]">
-              {totalResults === 0 ? 'No results' : `${totalResults} result${totalResults !== 1 ? 's' : ''}`} for "{results.query}"
+              {totalResults === 0
+                ? 'No results'
+                : `${totalResults} result${totalResults !== 1 ? 's' : ''}`} for &ldquo;{results.query}&rdquo;
             </p>
             <div className="flex-1 h-px bg-[#e0e0e0]" />
           </div>
 
-          {/* Entities section */}
+          {/* Entities */}
           {results.entities?.length > 0 && (
             <div className="mb-8">
-              <div className="flex items-center gap-4 mb-4">
-                <p className="label text-[#999]">Entities</p>
-                <div className="flex-1 h-px bg-[#e0e0e0]" />
-                <p className="label text-[#ccc]">{results.entities.length}</p>
-              </div>
+              <SectionHeader label="Entities" count={results.entities.length} />
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-px bg-[#e0e0e0]">
                 {results.entities.map(en => (
                   <button
@@ -135,17 +151,37 @@ export default function Search() {
             </div>
           )}
 
-          {/* Events section */}
+          {/* Financial events */}
           {results.events?.length > 0 && (
-            <div>
-              <div className="flex items-center gap-4 mb-4">
-                <p className="label text-[#999]">Events</p>
-                <div className="flex-1 h-px bg-[#e0e0e0]" />
-                <p className="label text-[#ccc]">{results.events.length}</p>
-              </div>
+            <div className="mb-8">
+              <SectionHeader label="Financial Events" count={results.events.length} />
               <div className="space-y-px">
                 {results.events.map(ev => (
                   <EventCard key={ev.id} event={ev} />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Geopolitical events */}
+          {results.geo_events?.length > 0 && (
+            <div className="mb-8">
+              <SectionHeader label="Geopolitical" count={results.geo_events.length} />
+              <div className="space-y-px">
+                {results.geo_events.map(ev => (
+                  <IntelCard key={ev.id} event={ev} />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Prediction markets */}
+          {results.predictions?.length > 0 && (
+            <div className="mb-8">
+              <SectionHeader label="Prediction Markets" count={results.predictions.length} />
+              <div className="space-y-px">
+                {results.predictions.map(ev => (
+                  <IntelCard key={ev.id} event={ev} />
                 ))}
               </div>
             </div>
@@ -158,7 +194,7 @@ export default function Search() {
               <div className="text-center">
                 <p className="label mb-1">No results</p>
                 <p className="text-xs font-light text-[#999]">
-                  Try a different query — company names, keywords, or event types work best.
+                  Try a different query — country names, company names, or event keywords work best.
                 </p>
               </div>
             </div>
@@ -166,14 +202,14 @@ export default function Search() {
         </>
       )}
 
-      {/* Empty state (no search yet) */}
+      {/* Empty state */}
       {!results && !loading && (
         <div className="py-16 flex flex-col items-center gap-6">
           <NetworkEmpty size={120} />
           <div className="text-center">
             <p className="label mb-1">Search the database</p>
             <p className="text-xs font-light text-[#999]">
-              Try "Apple", "acquisition", "Elon Musk", or "SEC Filing"
+              Try &ldquo;Ukraine&rdquo;, &ldquo;Apple&rdquo;, &ldquo;acquisition&rdquo;, or &ldquo;interest rate&rdquo;
             </p>
           </div>
         </div>

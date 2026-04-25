@@ -17,8 +17,33 @@ export function formatDate(dateStr) {
   if (!dateStr) return ''
   try {
     const d = new Date(dateStr)
+    const now = new Date()
+    const isToday     = d.toDateString() === now.toDateString()
+    const isThisYear  = d.getFullYear() === now.getFullYear()
+    if (isToday) {
+      return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
+    }
     return d.toLocaleDateString('en-US', {
-      year: 'numeric', month: 'short', day: 'numeric',
+      month: 'short', day: 'numeric',
+      ...(isThisYear ? {} : { year: 'numeric' }),
+    })
+  } catch {
+    return dateStr
+  }
+}
+
+export function formatDateTime(dateStr) {
+  if (!dateStr) return ''
+  try {
+    const d = new Date(dateStr)
+    const now = new Date()
+    const isThisYear = d.getFullYear() === now.getFullYear()
+    return d.toLocaleString('en-US', {
+      month:  'short',
+      day:    'numeric',
+      ...(isThisYear ? {} : { year: 'numeric' }),
+      hour:   '2-digit',
+      minute: '2-digit',
     })
   } catch {
     return dateStr

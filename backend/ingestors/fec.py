@@ -21,44 +21,19 @@ HEADERS = {
     "Accept": "application/json",
 }
 
-# Map seeded politician names to search terms the FEC API will recognize
-POLITICIAN_SEARCHES: dict[str, dict] = {
-    "Nancy Pelosi": {
-        "name": "PELOSI, NANCY",
-        "keywords": ["pelosi"],
-    },
-    "Donald Trump": {
-        "name": "TRUMP, DONALD J.",
-        "keywords": ["trump", "donald j. trump"],
-    },
-    "Mitch McConnell": {
-        "name": "MCCONNELL, MITCH",
-        "keywords": ["mcconnell"],
-    },
-    "Mitt Romney": {
-        "name": "ROMNEY, MITT",
-        "keywords": ["romney, mitt"],
-    },
-    "Alexandria Ocasio-Cortez": {
-        "name": "OCASIO-CORTEZ, ALEXANDRIA",
-        "keywords": ["ocasio-cortez", "aoc"],
-    },
-    "Tommy Tuberville": {
-        "name": "TUBERVILLE, TOMMY",
-        "keywords": ["tuberville"],
-    },
-    "Ro Khanna": {
-        "name": "KHANNA, RO",
-        "keywords": ["khanna, ro"],
-    },
-    "Dan Crenshaw": {
-        "name": "CRENSHAW, DAN",
-        "keywords": ["crenshaw, dan"],
-    },
-    "Gavin Newsom": {
-        "name": "NEWSOM, GAVIN",
-        "keywords": ["newsom"],
-    },
+# Hardcoded FEC candidate IDs — permanent identifiers that never change.
+# Only federal candidates appear in FEC; state-level politicians (Newsom, Buttigieg
+# post-USDOT) are intentionally omitted.
+# Source: https://www.fec.gov/data/candidates/
+POLITICIAN_CANDIDATE_IDS: dict[str, str] = {
+    "Nancy Pelosi":            "H8CA05036",
+    "Donald Trump":            "P80001571",
+    "Mitch McConnell":         "S8KY00012",
+    "Mitt Romney":             "S2UT00436",
+    "Alexandria Ocasio-Cortez":"H8NY15148",
+    "Tommy Tuberville":        "S0AL00289",
+    "Ro Khanna":               "H6CA17148",
+    "Dan Crenshaw":            "H8TX02095",
 }
 
 # Corporate entities to track for PAC/lobbying contributions
@@ -89,31 +64,6 @@ CORPORATE_ALIASES: dict[str, str] = {
 }
 
 
-def _search_candidate(name_query: str) -> str | None:
-    """Find the FEC candidate ID for a given politician name."""
-    if not FEC_API_KEY:
-        return None
-
-    try:
-        with httpx.Client(headers=HEADERS, timeout=20) as client:
-            resp = client.get(
-                f"{BASE_URL}/candidates/search/",
-                params={
-                    "api_key": FEC_API_KEY,
-                    "name":    name_query,
-                    "per_page": 1,
-                    "sort":    "-receipts",
-                },
-            )
-            resp.raise_for_status()
-            results = resp.json().get("results", [])
-            if results:
-                return results[0].get("candidate_id")
-    except Exception as exc:
-        print(f"[FEC] Candidate search error for '{name_query}': {exc}")
-    return None
-
-
 def _fetch_top_donors(candidate_id: str, cycle: int = 2024) -> list[dict]:
     """Fetch top individual/PAC donors to a candidate."""
     if not FEC_API_KEY:
@@ -139,27 +89,36 @@ def _fetch_top_donors(candidate_id: str, cycle: int = 2024) -> list[dict]:
     return []
 
 
-def _fetch_candidate_totals(candidate_id: str, cycle: int = 2024) -> dict | None:
-    """Fetch fundraising totals for a candidate."""
+def _fetch_candidate_totals(candidate_id: str) -> tuple[dict | None, int]:
+    """
+    Fetch the most recent fundraising totals for a candidate.
+    Tries cycles from most recent backwards — candidates who didn't run
+    in 2024 (e.g. McConnell, Romney) will have data in an earlier cycle.
+    Returns (totals_dict, cycle_year) or (None, 0).
+    """
     if not FEC_API_KEY:
-        return None
+        return None, 0
 
-    try:
-        with httpx.Client(headers=HEADERS, timeout=20) as client:
-            resp = client.get(
-                f"{BASE_URL}/candidates/{candidate_id}/totals/",
-                params={
-                    "api_key": FEC_API_KEY,
-                    "cycle":   cycle,
-                    "per_page": 1,
-                },
-            )
-            resp.raise_for_status()
-            results = resp.json().get("results", [])
-            return results[0] if results else None
-    except Exception as exc:
-        print(f"[FEC] Totals error for {candidate_id}: {exc}")
-    return None
+    for cycle in [2024, 2022, 2020, 2018]:
+        try:
+            with httpx.Client(headers=HEADERS, timeout=20) as client:
+                resp = client.get(
+                    f"{BASE_URL}/candidates/{candidate_id}/totals/",
+                    params={
+                        "api_key":  FEC_API_KEY,
+                        "cycle":    cycle,
+                        "per_page": 1,
+                    },
+                )
+                if resp.status_code == 404:
+                    continue  # no data for this cycle — try older
+                resp.raise_for_status()
+                results = resp.json().get("results", [])
+                if results:
+                    return results[0], cycle
+        except Exception as exc:
+            print(f"[FEC] Totals error for {candidate_id} cycle {cycle}: {exc}")
+    return None, 0
 
 
 def fetch_campaign_finance(db_conn: Any, entity_map: dict[str, str]) -> int:
@@ -176,21 +135,14 @@ def fetch_campaign_finance(db_conn: Any, entity_map: dict[str, str]) -> int:
 
     now = datetime.now(timezone.utc).isoformat()
     inserted = 0
-    current_cycle = 2024  # Most recent completed election cycle
 
-    for politician_name, search_config in POLITICIAN_SEARCHES.items():
+    for politician_name, candidate_id in POLITICIAN_CANDIDATE_IDS.items():
         entity_id = entity_map.get(politician_name)
         if not entity_id:
             continue  # Not a seeded entity
 
-        # Find the FEC candidate ID
-        candidate_id = _search_candidate(search_config["name"])
-        if not candidate_id:
-            print(f"[FEC] Could not find candidate ID for {politician_name}")
-            continue
-
-        # --- Event 1: Fundraising totals ---
-        totals = _fetch_candidate_totals(candidate_id, current_cycle)
+        # --- Event 1: Fundraising totals (most recent cycle available) ---
+        totals, current_cycle = _fetch_candidate_totals(candidate_id)
         if totals:
             total_raised = totals.get("receipts") or 0
             total_spent  = totals.get("disbursements") or 0
@@ -238,8 +190,8 @@ def fetch_campaign_finance(db_conn: Any, entity_map: dict[str, str]) -> int:
                     )
                     inserted += 1
 
-        # --- Event 2: Top institutional donors ---
-        donors = _fetch_top_donors(candidate_id, current_cycle)
+        # --- Event 2: Top institutional donors (same cycle) ---
+        donors = _fetch_top_donors(candidate_id, current_cycle) if current_cycle else []
         for donor in donors[:5]:  # Top 5 institutional donors only
             contributor = (donor.get("contributor_name") or "").strip()
             amount      = donor.get("contribution_receipt_amount")

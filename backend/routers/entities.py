@@ -1,9 +1,12 @@
-"""Entities router — browse and profile views."""
+"""Entities router -- browse and profile views."""
 import json
 from collections import defaultdict
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Query
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Query
 from backend.database import get_connection
+from backend.config import TWELVE_DATA_API_KEY
+from backend.middleware.tier_tracking import TIER_CONFIG, get_optional_user, get_tier
 
 router = APIRouter()
 
@@ -13,7 +16,11 @@ def list_entities(
     type: Optional[str] = Query(None),
     sector: Optional[str] = Query(None),
     q: Optional[str] = Query(None),
+    current_user: dict | None = Depends(get_optional_user),
 ) -> list[dict]:
+    tier = get_tier(current_user)
+    entity_limit = TIER_CONFIG[tier]["entity_limit"]
+
     conn = get_connection()
     cur = conn.cursor()
 
@@ -38,7 +45,10 @@ def list_entities(
     ).fetchall()
 
     conn.close()
-    return [dict(r) for r in rows]
+    result = [dict(r) for r in rows]
+    if entity_limit is not None:
+        result = result[:entity_limit]
+    return result
 
 
 @router.get("/entities/{entity_id}")
@@ -188,4 +198,59 @@ def get_entity_portfolio(entity_id: str) -> dict:
             "buys": buys,
             "sells": sells,
         },
+    }
+
+
+@router.get("/entities/{entity_id}/timeseries")
+def get_entity_timeseries(
+    entity_id: str,
+    days: int = Query(30, ge=7, le=90),
+) -> dict:
+    """Daily close price history for the entity's stock ticker via Twelve Data."""
+    conn = get_connection()
+    entity = conn.execute(
+        "SELECT ticker, name FROM entities WHERE id = ?", (entity_id,)
+    ).fetchone()
+    conn.close()
+
+    if not entity:
+        raise HTTPException(status_code=404, detail="Entity not found")
+
+    ticker = entity["ticker"]
+    if not ticker:
+        raise HTTPException(status_code=404, detail="No ticker for this entity")
+
+    if not TWELVE_DATA_API_KEY:
+        raise HTTPException(status_code=503, detail="Market data API key not configured")
+
+    try:
+        resp = httpx.get(
+            "https://api.twelvedata.com/time_series",
+            params={
+                "symbol": ticker,
+                "interval": "1day",
+                "outputsize": days,
+                "apikey": TWELVE_DATA_API_KEY,
+            },
+            timeout=12,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Market data fetch failed: {exc}")
+
+    if "values" not in data:
+        msg = data.get("message", "No time series data available")
+        raise HTTPException(status_code=502, detail=msg)
+
+    # Twelve Data returns newest-first; reverse so chart renders left-to-right
+    points = [
+        {"date": v["datetime"], "close": float(v["close"])}
+        for v in reversed(data["values"])
+    ]
+
+    return {
+        "ticker": ticker,
+        "entity_name": entity["name"],
+        "points": points,
     }

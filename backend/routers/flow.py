@@ -1,12 +1,9 @@
 """
-Flow map router — returns nodes + edges for the Obsidian-style graph.
+Flow map router -- returns nodes + edges for the Obsidian-style graph.
 
-Edge sources (in priority order):
-  1. Seeded high-confidence relationships (CEO/founder ties, known investments)
-  2. Political seeded edges (known stock holdings, donor relationships)
-  3. Congressional trade events → politician owns/trades stock in company
-  4. Acquisition events → acquirer controls target
-  5. Analysis JSON relationships → AI-derived entity connections
+Edge priority:
+  1. entity_connections table (live DB, includes confidence + validity)
+  2. Fallback: inline SEED_EDGES + event derivation (when DB table is empty)
 """
 import json
 from typing import Optional
@@ -153,11 +150,11 @@ def get_flow(
     seen: set[str] = set()
 
     def add_edge(
-        src_id: str, tgt_id: str, etype: str, label: str, weight: int = 2
+        src_id: str, tgt_id: str, etype: str, label: str,
+        weight: int = 2, confidence: str = "medium",
     ) -> None:
         if not src_id or not tgt_id or src_id == tgt_id:
             return
-        # Both nodes must be in our node set
         if src_id not in id_to_entity or tgt_id not in id_to_entity:
             return
         dedup = f"{src_id}|{tgt_id}|{etype}"
@@ -165,94 +162,110 @@ def get_flow(
             return
         seen.add(dedup)
         edges.append({
-            "source": src_id,
-            "target": tgt_id,
-            "type": etype,
-            "label": label,
-            "weight": weight,
+            "source":     src_id,
+            "target":     tgt_id,
+            "type":       etype,
+            "label":      label,
+            "weight":     weight,
+            "confidence": confidence,
         })
 
-    # 1. Seeded structural edges
-    for src_name, tgt_name, etype, label, weight in SEED_EDGES:
+    # 1. Primary: entity_connections table (live, has validity + confidence)
+    db_conn_rows = conn.execute(
+        """SELECT source_id, target_id, edge_type, label, weight, confidence
+           FROM entity_connections
+           WHERE valid_to IS NULL
+           LIMIT 500"""
+    ).fetchall()
+
+    db_has_data = len(db_conn_rows) > 0
+
+    for row in db_conn_rows:
         add_edge(
-            name_to_id.get(src_name.lower(), ""),
-            name_to_id.get(tgt_name.lower(), ""),
-            etype, label, weight,
+            row["source_id"], row["target_id"],
+            row["edge_type"], row["label"] or "",
+            row["weight"] or 2, row["confidence"] or "medium",
         )
 
-    # 2. Political seeded edges
-    for src_name, tgt_name, etype, label, weight in POLITICAL_EDGES:
-        add_edge(
-            name_to_id.get(src_name.lower(), ""),
-            name_to_id.get(tgt_name.lower(), ""),
-            etype, label, weight,
-        )
+    # 2. Fallback: inline seed edges (used before first scheduler run)
+    if not db_has_data:
+        for src_name, tgt_name, etype, label, weight in SEED_EDGES:
+            add_edge(
+                name_to_id.get(src_name.lower(), ""),
+                name_to_id.get(tgt_name.lower(), ""),
+                etype, label, weight, "high",
+            )
+        for src_name, tgt_name, etype, label, weight in POLITICAL_EDGES:
+            add_edge(
+                name_to_id.get(src_name.lower(), ""),
+                name_to_id.get(tgt_name.lower(), ""),
+                etype, label, weight, "medium",
+            )
 
-    # 3. Congressional trade events → politician → company edges
-    congress_rows = conn.execute(
-        """SELECT e.entity_id, e.headline, e.amount
-           FROM events e
-           WHERE e.event_type = 'congressional_trade'
-              OR e.subtype = 'congressional_trade'
-           LIMIT 200"""
-    ).fetchall()
-    for row in congress_rows:
-        politician_id = row["entity_id"]
-        headline = row["headline"].lower()
-        # Match ticker/company name in headline against entity names
-        for name_lower, company_id in name_to_id.items():
-            if company_id != politician_id and len(name_lower) > 3 and name_lower in headline:
-                entity_obj = id_to_entity.get(politician_id, {})
-                pol_name = entity_obj.get("name", "politician")
-                add_edge(politician_id, company_id, "congressional_trade",
-                         f"{pol_name} traded", max(1, int((row['amount'] or 0) / 50000)))
-                break  # one company per event
+        # Congressional trade fallback
+        congress_rows = conn.execute(
+            """SELECT e.entity_id, e.headline, e.amount
+               FROM events e
+               WHERE e.event_type = 'congressional_trade'
+                  OR e.subtype = 'congressional_trade'
+               LIMIT 200"""
+        ).fetchall()
+        for row in congress_rows:
+            politician_id = row["entity_id"]
+            headline = (row["headline"] or "").lower()
+            for name_lower, company_id in name_to_id.items():
+                if company_id != politician_id and len(name_lower) > 3 and name_lower in headline:
+                    entity_obj = id_to_entity.get(politician_id, {})
+                    pol_name = entity_obj.get("name", "politician")
+                    add_edge(
+                        politician_id, company_id, "congressional_trade",
+                        f"{pol_name} traded",
+                        max(1, int((row["amount"] or 0) / 50000)),
+                        "high",
+                    )
+                    break
 
-    # 4. Acquisition events → acquirer controls target
-    acq_rows = conn.execute(
-        """SELECT e.entity_id, e.headline
-           FROM events e WHERE e.event_type = 'acquisition' LIMIT 100"""
-    ).fetchall()
-    for row in acq_rows:
-        acquirer_id = row["entity_id"]
-        headline_lower = row["headline"].lower()
-        # Try to find target company name mentioned in headline
-        for name_lower, target_id in name_to_id.items():
-            if target_id != acquirer_id and len(name_lower) > 4 and name_lower in headline_lower:
-                add_edge(acquirer_id, target_id, "acquisition", "acquired", 5)
-                break
+        # Acquisition fallback
+        acq_rows = conn.execute(
+            """SELECT e.entity_id, e.headline
+               FROM events e WHERE e.event_type = 'acquisition' LIMIT 100"""
+        ).fetchall()
+        for row in acq_rows:
+            acquirer_id = row["entity_id"]
+            headline_lower = (row["headline"] or "").lower()
+            for name_lower, target_id in name_to_id.items():
+                if target_id != acquirer_id and len(name_lower) > 4 and name_lower in headline_lower:
+                    add_edge(acquirer_id, target_id, "acquisition", "acquired", 5, "high")
+                    break
 
-    # 5. Analysis JSON relationships
-    analysis_rows = conn.execute(
-        """SELECT e.entity_id, e.analysis
-           FROM events e
-           WHERE e.analysis IS NOT NULL
-           LIMIT 200"""
-    ).fetchall()
-    for row in analysis_rows:
-        try:
-            analysis = json.loads(row["analysis"])
-            for rel in analysis.get("relationships", []):
-                target_name = (rel.get("entity") or "").strip()
-                direction = rel.get("direction", "partner")
-                label_map = {
-                    "supplier":   "supplies",
-                    "customer":   "customer of",
-                    "competitor": "competes with",
-                    "partner":    "partners with",
-                    "investor":   "invested in",
-                    "subsidiary": "subsidiary of",
-                }
-                label = label_map.get(direction, direction)
-                tgt_id = _resolve_name(target_name, name_to_id)
-                if tgt_id:
-                    add_edge(row["entity_id"], tgt_id, direction, label, 2)
-        except Exception:
-            pass
+        # Analysis JSON fallback
+        analysis_rows = conn.execute(
+            """SELECT e.entity_id, e.analysis FROM events e
+               WHERE e.analysis IS NOT NULL LIMIT 200"""
+        ).fetchall()
+        label_map = {
+            "supplier": "supplies", "customer": "customer of",
+            "competitor": "competes with", "partner": "partners with",
+            "investor": "invested in", "subsidiary": "subsidiary of",
+        }
+        for row in analysis_rows:
+            try:
+                analysis = json.loads(row["analysis"])
+                for rel in analysis.get("relationships", []):
+                    target_name = (rel.get("entity") or "").strip()
+                    direction = rel.get("direction", "partner")
+                    tgt_id = _resolve_name(target_name, name_to_id)
+                    if tgt_id:
+                        add_edge(
+                            row["entity_id"], tgt_id, direction,
+                            label_map.get(direction, direction), 2, "medium",
+                        )
+            except Exception:
+                pass
 
     conn.close()
     return {
-        "nodes": entities,
-        "edges": edges,
+        "nodes":      entities,
+        "edges":      edges,
         "edge_types": EDGE_TYPES_ORDER,
     }

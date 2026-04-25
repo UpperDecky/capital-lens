@@ -45,3 +45,8 @@ logs/
 check_models.py
 test_enrichment.py
 self-hosted-ai-starter-kit/
+
+# === Claude AI / temp ===
+*.tmp
+=*
+.claude/

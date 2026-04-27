@@ -239,6 +239,24 @@ def init_db() -> None:
         CREATE INDEX IF NOT EXISTS idx_cf_src_cty  ON cash_flows(source_country);
         CREATE INDEX IF NOT EXISTS idx_cf_dst_cty  ON cash_flows(dest_country);
     """)
+    # ingestor_runs: performance and health tracking for all scheduler jobs
+    cur.executescript("""
+        CREATE TABLE IF NOT EXISTS ingestor_runs (
+            id                   TEXT PRIMARY KEY,
+            ingestor_name        TEXT NOT NULL,
+            started_at           TEXT NOT NULL,
+            completed_at         TEXT,
+            status               TEXT CHECK(status IN ('running','success','failed')),
+            events_fetched       INTEGER DEFAULT 0,
+            events_inserted      INTEGER DEFAULT 0,
+            error_message        TEXT,
+            run_duration_seconds REAL,
+            api_response_time_ms REAL
+        );
+        CREATE INDEX IF NOT EXISTS idx_ir_name    ON ingestor_runs(ingestor_name);
+        CREATE INDEX IF NOT EXISTS idx_ir_started ON ingestor_runs(started_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_ir_status  ON ingestor_runs(status);
+    """)
     conn.commit()
 
     for col_def in [
@@ -270,11 +288,16 @@ def init_db() -> None:
         except Exception:
             pass
 
-    try:
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_events_importance ON events(importance DESC)")
-        conn.commit()
-    except Exception:
-        pass
+    for idx_def in [
+        "CREATE INDEX IF NOT EXISTS idx_events_importance ON events(importance DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_events_entity_date ON events(entity_id, ingested_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_events_enriched ON events(enriched_at) WHERE enriched_at IS NULL",
+    ]:
+        try:
+            conn.execute(idx_def)
+            conn.commit()
+        except Exception:
+            pass
 
     try:
         probe_entity = conn.execute("SELECT id FROM entities LIMIT 1").fetchone()

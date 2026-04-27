@@ -13,6 +13,7 @@ ADMIN_SECRET = os.getenv("ADMIN_SECRET", "")
 from backend.database import init_db, seed_db, seed_events, seed_countries
 from backend.ingestors.connections_seed import seed_connections
 from backend.routers import feed, entities, themes, search, auth, flow, geo, intel, cashflow
+from backend.routers import admin_health, admin_analytics
 
 
 @asynccontextmanager
@@ -76,6 +77,8 @@ app.include_router(flow.router)
 app.include_router(geo.router)
 app.include_router(intel.router)
 app.include_router(cashflow.router)
+app.include_router(admin_health.router)
+app.include_router(admin_analytics.router)
 
 
 @app.get("/health")
@@ -159,6 +162,17 @@ def admin_ingest(
             "and Polygon news. Check /health for new events in ~15 seconds."
         ),
     }
+
+
+@app.post("/admin/load-entities")
+def admin_load_entities(
+    x_admin_secret: str | None = Header(default=None),
+) -> dict:
+    """Load S&P 500 + curated growth companies into the entities table."""
+    _check_admin(x_admin_secret)
+    from backend.ingestors.entity_loader import load_all_entities
+    result = load_all_entities()
+    return {"status": "ok", **result}
 
 
 @app.post("/admin/promote")

@@ -255,7 +255,6 @@ export default function CashFlow() {
   const arcGroupRef = useRef(null)
 
   const [flows,       setFlows]       = useState([])
-  const [liveFlows,   setLiveFlows]   = useState([])
   const [stats,       setStats]       = useState(null)
   const [loading,     setLoading]     = useState(true)
   const [activeTypes, setActiveTypes] = useState(new Set(ALL_TYPES))
@@ -267,13 +266,6 @@ export default function CashFlow() {
   const pathRef     = useRef(null)
 
   // ── Fetch data ──────────────────────────────────────────────────────────────
-  const fetchLive = useCallback(() => {
-    fetch('/cashflow/live?limit=50&hours=24')
-      .then(r => r.json())
-      .then(data => setLiveFlows(data))
-      .catch(() => {})
-  }, [])
-
   const fetchStats = useCallback(() => {
     fetch('/cashflow/stats')
       .then(r => r.json())
@@ -293,14 +285,10 @@ export default function CashFlow() {
 
   useEffect(() => {
     fetchFlows()
-    fetchLive()
     fetchStats()
-    const id = setInterval(() => {
-      fetchLive()
-      fetchFlows()
-    }, 15000)
+    const id = setInterval(fetchFlows, 15000)
     return () => clearInterval(id)
-  }, [fetchFlows, fetchLive])
+  }, [fetchFlows])
 
   // ── Build world map ─────────────────────────────────────────────────────────
   useEffect(() => {
@@ -366,14 +354,15 @@ export default function CashFlow() {
     const g    = d3.select(arcGroupRef.current)
     g.selectAll('*').remove()
 
-    const filtered = liveFlows.filter(f => {
+    const filtered = flows.filter(f => {
       if (!activeTypes.has(f.flow_type)) return false
       if (minAmount > 0 && (f.amount_usd || 0) < minAmount) return false
       const hasCoords = (
         f.source_lat != null && f.source_lon != null &&
         f.dest_lat   != null && f.dest_lon   != null &&
-        !(f.source_lat === 0 && f.source_lon === 0 &&
-          f.dest_lat   === 0 && f.dest_lon   === 0)
+        !(f.source_lat === 0 && f.source_lon === 0) &&
+        !(f.dest_lat   === 0 && f.dest_lon   === 0) &&
+        !(f.source_lat === f.dest_lat && f.source_lon === f.dest_lon)
       )
       return hasCoords
     })
@@ -459,7 +448,7 @@ export default function CashFlow() {
           setPanelMode('flow')
         })
     })
-  }, [liveFlows, mapReady, activeTypes, minAmount])
+  }, [flows, mapReady, activeTypes, minAmount])
 
   // ── Visible ticker flows (filtered) ────────────────────────────────────────
   const tickerFlows = flows.filter(f => {
@@ -468,7 +457,7 @@ export default function CashFlow() {
     return true
   })
 
-  const volume24h  = stats?.volume_24h  || sumVolume(liveFlows)
+  const volume24h  = stats?.volume_24h  || sumVolume(flows)
   const totalFlows = stats?.total_flows || flows.length
 
   function toggleType(t) {
@@ -572,7 +561,13 @@ export default function CashFlow() {
         )}
 
         {/* No arc data notice */}
-        {!loading && liveFlows.filter(f => activeTypes.has(f.flow_type) && f.source_lat && f.dest_lat && !(f.source_lat === 0 && f.dest_lat === 0)).length === 0 && mapReady && (
+        {!loading && flows.filter(f =>
+          activeTypes.has(f.flow_type) &&
+          f.source_lat && f.source_lon && f.dest_lat && f.dest_lon &&
+          !(f.source_lat === 0 && f.source_lon === 0) &&
+          !(f.dest_lat   === 0 && f.dest_lon   === 0) &&
+          !(f.source_lat === f.dest_lat && f.source_lon === f.dest_lon)
+        ).length === 0 && mapReady && (
           <div className="absolute bottom-24 left-1/2 -translate-x-1/2">
             <p className="text-[10px] text-white/20 uppercase tracking-widest text-center">
               Arcs appear as geolocated flows arrive&nbsp;&mdash;&nbsp;OFAC and VC flows draw first

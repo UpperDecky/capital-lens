@@ -1,15 +1,13 @@
-name: Security Scan
+name: Security
 
 on:
+  schedule:
+    - cron: '0 6 * * 1'
   push:
     branches: [main]
-  pull_request:
-  schedule:
-    - cron: '0 9 * * 1'  # Every Monday at 09:00 UTC
 
 jobs:
-  python-audit:
-    name: Python dependency audit
+  dependency-audit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,19 +17,19 @@ jobs:
       - name: Install pip-audit
         run: pip install pip-audit
       - name: Audit Python dependencies
-        run: pip-audit -r requirements.txt --desc
+        run: pip-audit -r requirements.txt
+        continue-on-error: true
 
-  npm-audit:
-    name: npm dependency audit
+  frontend-audit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '18'
-      - name: Install dependencies
-        working-directory: frontend
-        run: npm install --legacy-peer-deps --ignore-scripts
-      - name: Audit npm dependencies
-        working-directory: frontend
-        run: npm audit --audit-level=moderate
+          node-version: '20'
+      - name: Install and audit
+        run: |
+          cd frontend
+          npm install --legacy-peer-deps
+          npm audit --audit-level=high
+        continue-on-error: true

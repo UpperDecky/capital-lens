@@ -18,6 +18,8 @@ import Disclaimer from './pages/Disclaimer'
 import TermsOfService from './pages/TermsOfService'
 import PrivacyPolicy from './pages/PrivacyPolicy'
 import RiskWarning from './pages/RiskWarning'
+import AdminDashboard from './pages/AdminDashboard'
+import AdminAnalytics from './pages/AdminAnalytics'
 
 function P({ children }) {
   return <ProtectedRoute>{children}</ProtectedRoute>
@@ -55,6 +57,8 @@ export default function App() {
           <Route path="/watchlist"           element={<P><Watchlist /></P>} />
           <Route path="/cashflow"            element={<P><CashFlow /></P>} />
           <Route path="/settings"            element={<P><Settings /></P>} />
+          <Route path="/admin/health"        element={<AdminDashboard />} />
+          <Route path="/admin/analytics"     element={<AdminAnalytics />} />
         </Routes>
       </main>
       {!isAuthPage && !isLegalPage && <DisclaimerFooter />}
